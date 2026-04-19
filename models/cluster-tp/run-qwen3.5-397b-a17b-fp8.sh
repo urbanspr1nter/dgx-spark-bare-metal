@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# HuggingFace: https://huggingface.co/Qwen/Qwen3.5-122B-A10B-FP8
+# HuggingFace: https://huggingface.co/Qwen/Qwen3.5-397B-A17B-FP8
 
 export VLLM_IFACE=enp1s0f0np0
 export NCCL_SOCKET_IFNAME=$VLLM_IFACE
