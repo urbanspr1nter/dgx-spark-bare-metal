@@ -26,5 +26,7 @@ $HOME/models/modern/vllm/.venv/bin/vllm serve \
         --reasoning-parser qwen3 \
         --enable-auto-tool-choice \
         --tool-call-parser qwen3_coder \
+        --enable-prefix-caching \
         --tensor-parallel-size 2  \
-        --data-parallel-size 1
+        --data-parallel-size 1 \
+        --enable-expert-parallel
