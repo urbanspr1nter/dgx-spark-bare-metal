@@ -34,6 +34,17 @@ $HOME/models/modern/vllm
 
 This means you should be able to just `ssh` into each node and expect to find the same paths and common files.
 
+# Development Environment
+
+**CRITICAL** The main DGX Spark is `spark-01`. Here you have more tools available than the other Sparks. 
+
+Most importantly you live here!
+
+- You have passwordless SSH to all Sparks.
+- You have passwordless `sudo` in all Sparks.
+- You have Python, CUDA and Node installed properly.
+- You are running under `pi` coding agent.
+
 # DGX Spark IP Addresses
 
 Use IPv4 to access the DGX Sparks. This network is not configured to access by hostname.
