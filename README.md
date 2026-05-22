@@ -44,3 +44,14 @@ Spark A:
 ```sh
 ./run-qwen3.5-122b-a10b-fp8.sh
 ```
+
+# My Personal Setup
+
+- I have 4x DGX Sparks connected to a Mikrotik switch.
+
+|Name|IP Address|
+|----|----------|
+|spark-01|192.168.1.21|
+|spark-02|192.168.1.40|
+|spark-03|192.168.1.24|
+|spark-04|192.168.1.48|
