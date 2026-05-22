@@ -44,3 +44,20 @@ Use IPv4 to access the DGX Sparks. This network is not configured to access by h
 |spark-02|192.168.1.40|
 |spark-03|192.168.1.24|
 |spark-04|192.168.1.48|
+
+# Network Info
+
+To find the interface details you can run:
+
+`ibdev2netdev`
+
+Example output:
+
+```
+rocep1s0f0 port 1 ==> enp1s0f0np0 (Up)
+rocep1s0f1 port 1 ==> enp1s0f1np1 (Down)
+roceP2p1s0f0 port 1 ==> enP2p1s0f0np0 (Up)
+roceP2p1s0f1 port 1 ==> enP2p1s0f1np1 (Down)
+```
+
+Ideally, this should rarely ever change. I don't mess with physical things that often.
