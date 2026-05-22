@@ -12,6 +12,10 @@ export CONTEXT_LENGTH=262144
 
 $HOME/models/modern/vllm/.venv/bin/vllm serve --model "$MODEL_PATH" \
         --served-model-name DeepSeek-V4-Flash \
+        --enforce-eager \
+        --distributed-executor-backend ray \
+        --data-parallel-address 169.254.195.229 \
+        --data-parallel-rpc-port 13345 \
         --gpu-memory-utilization 0.95 \
         --max-model-len $CONTEXT_LENGTH \
         --host 0.0.0.0 \
@@ -21,7 +25,10 @@ $HOME/models/modern/vllm/.venv/bin/vllm serve --model "$MODEL_PATH" \
         --tokenizer-mode deepseek_v4 \
         --reasoning-parser deepseek_v4 \
         --tool-call-parser deepseek_v4 \
+        --attention-backend triton_atten \
         --enable-auto-tool-choice \
+        --enable-prefix-caching \
         --tensor-parallel-size 4 \
+        --data-parallel-size 1 \
         --trust-remote-code \
         --enable-expert-parallel
