@@ -31,6 +31,8 @@ mkdir -p "$VLLM_PATH"
 cd "$VLLM_PATH"
 git clone https://github.com/vllm-project/vllm
 
+cd "$VLLM_PATH/vllm"
+
 git checkout $VLLM_VERSION
 git clean -fdx
 git reset HEAD --hard
