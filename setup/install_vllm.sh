@@ -29,7 +29,7 @@ fi
 mkdir -p "$VLLM_PATH"
 
 cd "$VLLM_PATH"
-git clone https://github.com/vllm-project/vllm
+git clone https://github.com/urbanspr1nter/vllm
 
 cd "$VLLM_PATH/vllm"
 
