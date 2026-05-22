@@ -16,6 +16,24 @@ For example, if you want to SSH:
 ssh "$USER@192.168.1.21"
 ```
 
+# File System Layout
+
+**CRITICAL** - Each DGX Spark node has the _same_ filesystem layout. 
+
+For example, this means this path is consistent for all nodes:
+
+```sh
+$HOME/models/start-ray.sh
+```
+
+Or 
+
+```
+$HOME/models/modern/vllm
+```
+
+This means you should be able to just `ssh` into each node and expect to find the same paths and common files.
+
 # DGX Spark IP Addresses
 
 Use IPv4 to access the DGX Sparks. This network is not configured to access by hostname.

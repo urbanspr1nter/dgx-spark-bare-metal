@@ -6,6 +6,7 @@ export GLOO_SOCKET_IFNAME=$VLLM_IFACE
 export NCCL_IB_HCA=rocep1s0f0
 export NCCL_IB_DISABLE=0
 export VLLM_HOST_IP=169.254.195.229
+export VLLM_DISABLED_KERNELS=CutlassFp8BlockScaledMMKernel
 
 export MODEL_PATH=$HOME/models/DeepSeek-V4-Flash
 export CONTEXT_LENGTH=262144
@@ -25,7 +26,7 @@ $HOME/models/modern/vllm/.venv/bin/vllm serve --model "$MODEL_PATH" \
         --tokenizer-mode deepseek_v4 \
         --reasoning-parser deepseek_v4 \
         --tool-call-parser deepseek_v4 \
-        --attention-backend triton_atten \
+        --attention-backend triton_attn \
         --enable-auto-tool-choice \
         --enable-prefix-caching \
         --tensor-parallel-size 4 \
