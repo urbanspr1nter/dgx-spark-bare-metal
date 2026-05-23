@@ -15,20 +15,13 @@ Tip: `ls -la` on `$HOME/models`.
 
 ## Starting Ray Cluster
 
-**IMPORTANT** - You must run `start-ray.sh` in the same directory as the `vllm` virtual environment! So take into consideration in running it relatively if you are invoking it from another place other than the `vllm` repo.
+Use the `ray-start` skill script (see [02-Start-Ray-Cluster.md](./02-Start-Ray-Cluster.md)):
 
-Here is the order in which you should start the `ray` cluster.
+```bash
+./agents/skills/ray-start/scripts/start_cluster.sh
+```
 
-I am referring to the Sparks by their logical name here, but alway use the IPv4 address found in the [00-Infrastructure.md](./00-Infrastructure.md) table.
-
-- Run `start-ray.sh` in `spark-01`
-- Wait 10 seconds.
-- Run `start-ray.sh` in `spark-02`
-- Wait 10 seconds.
-- Run `start-ray.sh` in `spark-03`
-- Wait 10 seconds.
-- Run `start-ray.sh` in `spark-04`.
-- Wait 10 seconds.
+**IMPORTANT** - If starting manually, you must run `start-ray.sh` in the same directory as the `vllm` virtual environment (`$HOME/models/vllm`). The skill script handles this automatically.
 
 ## Running a Model
 
