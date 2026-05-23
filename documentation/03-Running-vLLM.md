@@ -7,6 +7,12 @@ Essentially you need to do the following:
 1. Start `ray` cluster. First on `spark-01` then `spark-02`, `spark-03` and `spark-04` in that exact order. `spark-01` is the main node.
 2. Run one of the model scripts found in `model_scripts`.
 
+## Where are my models?
+
+Models are in `$HOME/models`. 
+
+Tip: `ls -la` on `$HOME/models`.
+
 ## Starting Ray Cluster
 
 **IMPORTANT** - You must run `start-ray.sh` in the same directory as the `vllm` virtual environment! So take into consideration in running it relatively if you are invoking it from another place other than the `vllm` repo.
