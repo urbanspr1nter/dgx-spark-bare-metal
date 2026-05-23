@@ -1,23 +1,42 @@
-# vLLM installation
+# vLLM Installation
 
-To go from a clean state, assume the path where we want to clone `vllm` to be `$HOME/models/modern`. 
+**CRITICAL** — vLLM must be installed on **all 4 nodes** in the cluster. Model scripts reference `$HOME/models/vllm/.venv/bin/vllm`, so the install path must be `$HOME/models` on every Spark.
 
-We can execute the `setup/clean_vllm.sh` script. It will deactivate the current virtual environment, and remove the repo. You can run it like:
+## Cluster-wide Install (Recommended)
 
-```bash
-./setup/clean_vllm.sh $HOME/models/modern
-```
-
-Then clone the `vllm` repo specific to your version tag (e.g., v0.21.0) with the parent directory which you should clone the `vllm` repo into. For example, the following below will clone `vllm` into `$HOME/models/modern` and checkout the `v0.21.0` tag.
+Use the `vllm-install` skill script to install across all 4 nodes at once:
 
 ```bash
-./setup/install_vllm.sh $HOME/models/modern v0.21.0
+./agents/skills/vllm-install/scripts/install_cluster.sh v0.21.0
 ```
 
-The above script will:
+This script will:
 
-- Clone, checkout the tag
-- Create a virtual environment
-- Install build dependencies
-- Build `vllm` and install to the environment
-- Install `ray` distributed backend
+1. **Rsync** the repo to spark-02/03/04 (ensures the install script is available on every node).
+2. **spark-01 (local)** — Create a **new tmux window** in session `0` (named `vllm-install`) so it doesn't disrupt your existing pi window. The build runs there.
+3. **spark-02/03/04 (remote)** — Send the install command into the **existing** tmux session `0` on each node so you can attach and watch.
+4. Print a summary showing where to attach tmux to monitor progress.
+
+This is a full source compile — expect 15-30 minutes per node. Each node prints `=== <NODE> INSTALL COMPLETE ===` when finished.
+
+See the [vllm-install skill](../.agents/skills/vllm-install/SKILL.md) for full details.
+
+## Single-node Install
+
+To install on just one node (e.g., for testing), use the setup script directly:
+
+```bash
+./setup/install_vllm.sh $HOME/models v0.21.0
+```
+
+The first argument is the parent directory — the repo gets cloned into `$1/vllm` and the venv lives at `$1/vllm/.venv`.
+
+## Clean Install
+
+To wipe an existing vLLM install and start fresh:
+
+```bash
+./setup/clean_vllm.sh $HOME/models $HOME/models/vllm/.venv
+```
+
+The first argument is the parent directory containing the `vllm/` repo. The second is the path to the virtual environment (needed to deactivate it first). Must be repeated on each node manually.
