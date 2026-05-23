@@ -1,5 +1,7 @@
 # Infrastructure
 
+**CRITICAL** - All DGX Sparks in the network are already enabled for RDMA access. They can talk to each other already. Don't over-index on that.
+
 The 4x DGX Spark cluster setup allows us to have effectively 480 GB (4x120 GB) of usable memory for inference.
 
 Note: We don't use all of the specified 128 GB each DGX Spark has since we need to reserve some memory for the operating system.
