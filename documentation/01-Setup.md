@@ -33,7 +33,13 @@ The first argument is the parent directory — the repo gets cloned into `$1/vll
 
 ## Clean Install
 
-To wipe an existing vLLM install and start fresh:
+**CRITICAL** — You must stop the Ray cluster before cleaning or reinstalling vLLM. If Ray is running with vLLM loaded, wiping the venv will leave the cluster in a broken state. Stop Ray first:
+
+```bash
+./agents/skills/ray-start/scripts/stop_cluster.sh
+```
+
+Then to wipe an existing vLLM install and start fresh:
 
 ```bash
 ./setup/clean_vllm.sh $HOME/models $HOME/models/vllm/.venv

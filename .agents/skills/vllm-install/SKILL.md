@@ -37,6 +37,7 @@ Run from the skill directory, or from anywhere — the script locates the repo r
 
 ## Prerequisites
 
+- **Ray cluster must be stopped.** If Ray is running, stop it first using the `ray-start` skill (`./scripts/stop_cluster.sh`). Running `clean_vllm.sh` or reinstalling vLLM while Ray is active will leave the cluster in a broken state.
 - Passwordless SSH to all Sparks (spark-01 already has this).
 - `env.sh` at repo root with `SPARK_01_IP` through `SPARK_04_IP` defined.
 - Python 3, CUDA toolkit, and build tools on each node.

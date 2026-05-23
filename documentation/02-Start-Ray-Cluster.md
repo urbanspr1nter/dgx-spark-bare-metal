@@ -21,11 +21,13 @@ See the [ray-start skill](../.agents/skills/ray-start/SKILL.md) for full details
 
 ## Stopping the Cluster
 
+**CRITICAL** — Stop in reverse order: spark-04 → spark-03 → spark-02 → spark-01. Workers must be stopped before the head node.
+
 ```bash
 ./agents/skills/ray-start/scripts/stop_cluster.sh
 ```
 
-Stops workers first, then the head node.
+The script handles the ordering automatically.
 
 ## Manual Start
 

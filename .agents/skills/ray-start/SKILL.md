@@ -26,7 +26,7 @@ Run from the skill directory, or from anywhere — the script locates the repo r
 
 ## Stopping the Cluster
 
-To stop Ray on all nodes:
+**CRITICAL** — Stop in reverse order: spark-04 → spark-03 → spark-02 → spark-01. Workers must be stopped before the head node.
 
 ```bash
 ./scripts/stop_cluster.sh
@@ -38,3 +38,7 @@ To stop Ray on all nodes:
 - Passwordless SSH to all Sparks.
 - `env.sh` at repo root with `SPARK_01_IP` through `SPARK_04_IP` defined.
 - `cluster/start-ray-spark-{a,b,c,d}.sh` scripts present in the repo.
+
+## Before Reinstalling vLLM
+
+**CRITICAL** — Always stop the Ray cluster before running `clean_vllm.sh` or reinstalling vLLM. Wiping the venv while Ray is running will leave the cluster in a broken state.
