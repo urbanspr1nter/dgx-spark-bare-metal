@@ -1,20 +1,19 @@
 #!/bin/bash
 
-
 # Setup the environment variables that will influence: 
 # 1. the version of VLLM
 # 2. relative locations of things
 
-TORCH_CUDA_ARCH_LIST=12.1a
-
 # tip: How to use
-# ./install.sh $HOME/models/modern v0.21.0
+# ./install.sh $HOME/models v0.21.0
 
 if [ -z "$1" ] || [ -z "$2" ]; then
     echo "Usage: $0 <vllm_path> <vllm_version>"
-    echo "Example: ./install.sh $HOME/models/modern v0.21.0"
+    echo "Example: ./install.sh $HOME/models v0.21.0"
     exit 1
 fi
+
+TORCH_CUDA_ARCH_LIST=12.1a
 
 VLLM_PATH=$1
 VLLM_VERSION=$2
