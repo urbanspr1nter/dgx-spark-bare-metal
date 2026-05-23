@@ -11,7 +11,7 @@ export VLLM_DISABLED_KERNELS=CutlassFp8BlockScaledMMKernel
 export MODEL_PATH=$HOME/models/DeepSeek-V4-Flash
 export CONTEXT_LENGTH=262144
 
-$HOME/models/modern/vllm/.venv/bin/vllm serve --model "$MODEL_PATH" \
+$HOME/models/vllm/.venv/bin/vllm serve --model "$MODEL_PATH" \
         --served-model-name DeepSeek-V4-Flash \
         --enforce-eager \
         --distributed-executor-backend ray \

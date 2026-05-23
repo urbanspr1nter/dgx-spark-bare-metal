@@ -11,7 +11,7 @@ export VLLM_HOST_IP=169.254.195.229
 export VLLM_DISABLED_KERNELS=CutlassFp8BlockScaledMMKernel
 
 # Note the modern location!
-$HOME/models/modern/vllm/.venv/bin/vllm serve \
+$HOME/models/vllm/.venv/bin/vllm serve \
         --enforce-eager \
         --distributed-executor-backend ray \
         --data-parallel-address 169.254.195.229 \
