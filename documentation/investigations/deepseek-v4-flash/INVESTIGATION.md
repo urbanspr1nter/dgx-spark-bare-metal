@@ -1,6 +1,6 @@
 # DeepSeek-V4-Flash on DGX Spark (sm_121 / GB10)
 
-## Status: In Progress — Blockers #1–#3 fixed; Blocker #4 (FlashMLA) is next
+## Status: In Progress — Blockers #1–#3 fixed; Blocker #4 (FlashMLA) Phase 3 complete; Phase 4 (MQA logits) next
 
 **Goal:** Serve DeepSeek-V4-Flash (284B MoE, 13B active params) on a 4× DGX Spark cluster.
 
@@ -43,7 +43,7 @@ Each blocker was discovered incrementally: fix one, run the model, see what cras
   - New Triton kernel `deepseek_v4_sm12x_fp8_einsum` in `vllm/v1/attention/ops/deepseek_v4_ops/fp8_einsum.py`
   - Dispatch in `deepseek_v4_fp8_einsum`: reshape 2D→3D weights on SM12x, call Triton kernel
 
-### Blocker #4: FlashMLA C extension not compiled for sm_121 — 🔴 CURRENT
+### Blocker #4: FlashMLA C extension not compiled for sm_121 — 🟡 Phase 3 complete; awaiting end-to-end test
 
 - **Crash:** `RuntimeError: vllm._flashmla_C is not available`
 - **Location:** Decode attention (`flash_mla_with_kvcache`) and prefill attention (`flash_mla_sparse_fwd`)
@@ -192,19 +192,23 @@ This is the hardest phase despite being the smallest in lines — it touches `de
 
 **Test:** Method fully implemented, imports verified. End-to-end test requires running DS4-Flash (deferred to post-Phase 3d integration test).
 
-#### Phase 3d: Prefill path (~100 lines changed/added)
+#### Phase 3d: Prefill path — ✅ DONE (commit `4e2b2a4d8`)
 
-Prefill path with Triton chunked attention. Replaces `flash_mla_sparse_fwd` with `accumulate_indexed_sparse_mla_attention_chunk` + `finish_sparse_mla_attention_with_sink`.
+**Files modified:**
+- **Modified** `vllm/model_executor/layers/deepseek_v4_attention.py` (+174/-19)
+  - Added `_forward_sparse_mla_prefill_triton` method (75 lines):
+    - Double-nested loop: outer over query chunks (`query_chunk_size`), inner over index chunks (`topk_chunk_size`)
+    - `accumulate_indexed_sparse_mla_attention_chunk` per index chunk, then `finish_sparse_mla_attention_with_sink`
+    - Zero padding heads when `padded_heads > num_heads`
+  - Modified `_forward_prefill` (99 lines changed):
+    - Compute N/M from actual batch metadata via `_sparse_mla_prefill_workspace_bounds` when `seq_lens_cpu`/`gather_lens_cpu` available
+    - Compute `max_query_chunk_tokens` and `combined_topk` before workspace reservation
+    - Reserve Triton state buffers (max_score, denom, acc) when SM12x detected
+    - Pre-allocate `combined_indices_buffer` and `combined_lens_buffer`, pass to `combine_topk_swa_indices`
+    - Dispatch to `_forward_sparse_mla_prefill_triton` when `is_triton_sparse_mla_enabled`
+    - ROCm and FlashMLA paths unchanged
 
-**Files to modify:**
-- **Modify** `vllm/model_executor/layers/deepseek_v4_attention.py`
-  - Add `_forward_sparse_mla_prefill_triton` method on `DeepseekV4MLAAttention` — double-nested loop: outer over query chunks (`query_chunk_size`), inner over index chunks (`topk_chunk_size`)
-  - Add `_sparse_mla_prefill_workspace_bounds` helper — computes N and M from actual seq_lens/gather_lens instead of max_model_len (more accurate workspace sizing)
-  - Add `_sparse_mla_prefill_gather_len_upper_bound` helper — upper bound for workspace reservation during profiling
-  - Modify `_forward_prefill` — reserve workspace with Triton state buffers when SM12x, pass pre-allocated `combined_indices_buffer`/`combined_lens_buffer` to `combine_topk_swa_indices`, dispatch to `_forward_sparse_mla_prefill_triton` instead of `flash_mla_sparse_fwd`
-  - Modify dummy-run path to call `_reserve_prefill_workspace()`
-
-**Test:** Run DS4-Flash with a prompt — prefill should complete without FlashMLA crash.
+**Test:** Method implemented, imports verified. End-to-end test requires running DS4-Flash.
 
 ### Phase 3 risk summary
 
