@@ -8,7 +8,6 @@ export GLOO_SOCKET_IFNAME=$VLLM_IFACE
 export NCCL_IB_HCA=rocep1s0f0
 export NCCL_IB_DISABLE=0
 export VLLM_HOST_IP=169.254.195.229
-export VLLM_DISABLED_KERNELS=CutlassFp8BlockScaledMMKernel
 
 # Note the modern location!
 $HOME/models/vllm/.venv/bin/vllm serve \

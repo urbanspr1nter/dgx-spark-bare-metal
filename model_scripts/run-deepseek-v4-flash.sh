@@ -16,7 +16,7 @@ $HOME/models/vllm/.venv/bin/vllm serve --model "$MODEL_PATH" \
         --distributed-executor-backend ray \
         --data-parallel-address 169.254.195.229 \
         --data-parallel-rpc-port 13345 \
-        --gpu-memory-utilization 0.95 \
+        --gpu-memory-utilization 0.90 \
         --max-model-len $CONTEXT_LENGTH \
         --host 0.0.0.0 \
         --port 8000 \
