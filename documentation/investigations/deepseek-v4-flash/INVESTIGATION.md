@@ -163,19 +163,21 @@ This is the hardest phase despite being the smallest in lines — it touches `de
 
 **Tests passed:** All imports verified, helper functions tested, `combine_topk_swa_indices` buffer reuse verified (same data pointer), `DeepseekSparseSWAMetadata` CPU fields present.
 
-#### Phase 3b: SWA decode path (~70 lines new)
+#### Phase 3b: SWA decode path — ✅ DONE (commit `292824e3a`)
 
-The simplest decode path — SWA-only layers (compress_ratio ≤ 1). Two sub-paths:
+**Files modified:**
+- **Modified** `vllm/model_executor/layers/deepseek_v4_attention.py` (+122)
+  - Added `_forward_sparse_mla_swa_decode_triton` method on `DeepseekV4MLAAttention`
+    - Non-MTP: `fp8ds_paged_sparse_mla_attention_with_sink_multihead` (fused paged decode)
+    - MTP: `accumulate_fp8ds_global_slots_sparse_mla_attention_chunk_multihead` + `finish_sparse_mla_attention_with_sink` (slot-based addressing)
+    - Both zero padding heads when `padded_heads > num_heads`
+  - Added `is_triton_sparse_mla_enabled(q.device)` dispatch in `_forward_decode`
+    - SWA-only: → `_forward_sparse_mla_swa_decode_triton`
+    - Compressed: → `_forward_sparse_mla_compressed_decode_triton` (stub, Phase 3c)
+    - Otherwise: fall through to FlashMLA
+  - Store `compressed_k_cache` before unsqueezing `kv_cache` for Triton path
 
-1. **Non-MTP** (1 token per seq): single kernel call `fp8ds_paged_sparse_mla_attention_with_sink_multihead`
-2. **MTP** (multi-token per seq): chunked `accumulate_fp8ds_global_slots_sparse_mla_attention_chunk_multihead` + `finish_sparse_mla_attention_with_sink`
-
-**Files to modify:**
-- **Modify** `vllm/model_executor/layers/deepseek_v4_attention.py`
-  - Add `_forward_sparse_mla_swa_decode_triton` method on `DeepseekV4MLAAttention`
-  - Add dispatch in `_forward_decode`: `if is_triton_sparse_mla_enabled(q.device) and swa_only: → triton path; return`
-
-**Test:** Run DS4-Flash — SWA-only layers (first 3 layers) should decode without FlashMLA crash.
+**Test:** `is_triton_sparse_mla_enabled(cuda:0)` returns True on sm_121. SWA-only layers will use Triton path at runtime.
 
 #### Phase 3c: Compressed decode path (~170 lines new)
 
