@@ -273,6 +273,67 @@ The crash happens at **layer 0, step 1** (mHC pre-norm). We don't even get to te
 
 This confirms that cherry-picking from jasl/vllm is the right approach. The question is how to do it cleanly onto v0.21.0.
 
+## tilelang on sm_121 — verified working (2025-05-24)
+
+tilelang 0.1.9 is installed in the vLLM venv and **works on sm_121**. Tested the actual `mhc_pre_big_fuse_tilelang` kernel from `vllm/model_executor/layers/mhc.py` with real tensor shapes (hidden_size=7168, hc_mult=4) and it:
+
+1. **JIT-compiled successfully** on sm_121 (took ~7 seconds for first compilation)
+2. **Ran without errors** — no architecture assertion failures
+3. **Produced numerically correct results** — Sinkhorn-normalized doubly-stochastic matrices with row/col sums ≈ 0.99 (the epsilon offset from 1.0 is expected)
+
+This means the **post-GEMM fusion step** of mHC (`mhc_pre_big_fuse_tilelang`) already works on sm_121. Only the **GEMM step** (`tf32_hc_prenorm_gemm`) needs a fallback.
+
+Also confirmed: TVM (which tilelang uses under the hood) correctly targets `cuda -arch=sm_121`.
+
+## tf32_hc_prenorm_gemm SM12x fallback — jasl/vllm approach (2025-05-24)
+
+jasl/vllm's `ds4-sm120` branch adds SM12x fallbacks in `vllm/utils/deep_gemm.py`. The approach is clean:
+
+### Architecture check at dispatch
+
+```python
+def tf32_hc_prenorm_gemm(x, fn, out, sqrsum, num_split):
+    if current_platform.is_device_capability_family(120):
+        return _tf32_hc_prenorm_gemm_sm12x(x, fn, out, sqrsum, num_split)
+    _lazy_init()  # DeepGEMM path for sm_90/sm_100
+    if _tf32_hc_prenorm_gemm_impl is None:
+        return _missing()
+    return _tf32_hc_prenorm_gemm_impl(x, fn, out, sqrsum, num_split)
+```
+
+### Two-level SM12x fallback
+
+**Primary: Triton kernel** (`_tf32_hc_prenorm_gemm_sm12x`)
+- If `out.dim() == 3 and sqrsum.dim() == 2`, uses `tf32_hc_prenorm_gemm_triton` from `deepseek_v4_triton_kernels.py`
+- The Triton kernel does split-K GEMM with `tl.dot(x, fn, input_precision="tf32")`, accumulating partial products across splits
+- This matches DeepGEMM's split-K output format — downstream `mhc_pre_big_fuse_tilelang` sums across the split dimension
+
+**Fallback: Pure PyTorch** (`_tf32_hc_prenorm_gemm_torch`)
+- If the Triton kernel is unavailable or tensor dims don't match, falls back to pure `torch.matmul`
+- Computes `product = x.float() @ fn.float().T` and `norm = x.float().square().sum(dim=-1)`
+- Writes full result to split-0, zeros other splits — downstream fusion sums across splits and gets the correct result
+- Simpler but slower than the Triton kernel
+
+### The Triton kernel (from `deepseek_v4_triton_kernels.py`)
+
+The kernel `_tf32_hc_prenorm_gemm_kernel` is a straightforward split-K matmul:
+- Each program handles one (M-block, N-block, split) tile
+- Accumulates `acc += tl.dot(x, fn, input_precision="tf32")` and `sq += tl.sum(x * x, axis=1)` over K within the split range
+- Block sizes: `BLOCK_M=16`, `BLOCK_N=power_of_2(N)` (clamped 16-32), `BLOCK_K=64`, `num_warps=4`
+- Very portable — uses only `tl.dot` with tf32 precision, no arch-specific instructions
+
+### What this means for our port
+
+The `tf32_hc_prenorm_gemm` fix is **self-contained and small**:
+1. Add the SM12x dispatch check to `vllm/utils/deep_gemm.py`
+2. Add `_tf32_hc_prenorm_gemm_torch` (7 lines of logic)
+3. Add `_tf32_hc_prenorm_gemm_sm12x` (10 lines)
+4. Add the Triton kernel `tf32_hc_prenorm_gemm_triton` to a new or existing Triton kernels file
+
+This is a good first PR — small, well-understood, and it unblocks the very first forward pass.
+
+The `mhc_pre_big_fuse_tilelang` kernel (the fusion step) already works on sm_121, so **no changes needed there**.
+
 ## Current run script
 
 `model_scripts/run-deepseek-v4-flash.sh` — currently has `--enforce-eager` and `VLLM_DISABLED_KERNELS` is NOT set (good). DeepGEMM install script is at `model_scripts/deepseek-v4-flash-prereq/deepgemm-install.sh`.
