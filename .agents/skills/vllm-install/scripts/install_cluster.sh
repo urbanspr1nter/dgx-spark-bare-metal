@@ -21,7 +21,8 @@ REMOTE_NAMES=("${NODE_NAMES[@]:1}")
 
 SSH_OPTS="-o ConnectTimeout=5 -o BatchMode=yes"
 
-VLLM_VERSION="${1:?Usage: $0 <vllm_version> (e.g. v0.21.0)}"
+VLLM_VERSION="${1:?Usage: $0 <vllm_ref> [--branch] (e.g. v0.21.0 or v0.21.0-sm121-fix --branch)}"
+BRANCH_FLAG="${2:-}"
 VLLM_PATH="\$HOME/models"
 REPO_PATH="\$HOME/code/dgx-spark-bare-metal"
 
@@ -109,7 +110,7 @@ tmux new-window -t "${TMUX_SESSION}:${NEXT_INDEX}" -n "$WINDOW_NAME" -c "$REPO_R
 }
 
 tmux send-keys -t "${TMUX_SESSION}:${NEXT_INDEX}" \
-    "cd $REPO_ROOT && bash setup/install_vllm.sh $VLLM_PATH $VLLM_VERSION; echo '=== SPARK-01 INSTALL COMPLETE ==='" Enter
+    "cd $REPO_ROOT && bash setup/install_vllm.sh $VLLM_PATH $VLLM_VERSION $BRANCH_FLAG; echo '=== SPARK-01 INSTALL COMPLETE ==='" Enter
 
 pass "spark-01: build started in tmux window ${TMUX_SESSION}:${NEXT_INDEX} (named '$WINDOW_NAME')"
 
@@ -119,7 +120,7 @@ for i in "${!REMOTE_NODES[@]}"; do
     name="${REMOTE_NAMES[$i]}"
     # Send the install command into the existing tmux session 0 on the remote node
     ssh $SSH_OPTS "$USER@$ip" \
-        "tmux send-keys -t 0 'cd $REPO_PATH && bash setup/install_vllm.sh $VLLM_PATH $VLLM_VERSION; echo === ${name^^} INSTALL COMPLETE ===' Enter" 2>/dev/null
+        "tmux send-keys -t 0 'cd $REPO_PATH && bash setup/install_vllm.sh $VLLM_PATH $VLLM_VERSION $BRANCH_FLAG; echo === ${name^^} INSTALL COMPLETE ===' Enter" 2>/dev/null
     pass "$name: build started in tmux session 0"
 done
 
@@ -135,4 +136,8 @@ echo "  spark-04:  ssh $USER@${NODES[3]}  then tmux attach -t 0"
 echo ""
 echo "  Each node will print '=== <NODE> INSTALL COMPLETE ===' when done."
 echo "  This is a full source build — expect 15-30 minutes per node."
+echo ""
+if [ "$BRANCH_FLAG" = "--branch" ]; then
+    echo "  Branch mode: git clean/reset skipped. Building from branch '$VLLM_VERSION'."
+fi
 echo ""

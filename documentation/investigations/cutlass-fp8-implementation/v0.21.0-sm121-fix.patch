@@ -1,0 +1,72 @@
+From cb44fd8b91f75624f63fa051b4d02b4db9f0844b Mon Sep 17 00:00:00 2001
+From: Roger Ngo <urbanspr1nter@gmail.com>
+Date: Sat, 23 May 2026 13:50:26 -0700
+Subject: [PATCH] Fix sm_121 (DGX Spark) support for CUTLASS FP8 kernels
+
+Three changes to enable native sm_121 cubin generation and runtime
+execution on NVIDIA GB10 / DGX Spark:
+
+1. CMakeLists.txt: Add 12.1 to CUDA_SUPPORTED_ARCHS for CUDA >= 13.0.
+   Without this, the initial CUDA_ARCHS intersection filters out 12.1
+   before any per-kernel arch list can include it, so no sm_121 cubins
+   are ever compiled. This is the root cause of the
+   CutlassFp8BlockScaledMMKernel crash on sm_121.
+
+2. scaled_mm_sm120_fp8_dispatch.cuh: Change enable_sm120_only to
+   enable_sm120_family in cutlass_3x_gemm_sm120_custom. The
+   enable_sm120_only guard checks __CUDA_ARCH__ == 1200 which traps
+   on sm_121 (where __CUDA_ARCH__ == 1210).
+
+3. scaled_mm.cuh: Change enable_sm120_only to enable_sm120_family
+   in cutlass_3x_gemm_sm120. Same reason as #2.
+
+Note: The blockwise FP8 dispatch (scaled_mm_blockwise_sm120_fp8_dispatch.cuh)
+already uses enable_sm120_family and did not need changing.
+---
+ CMakeLists.txt                                                  | 2 +-
+ .../libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm.cuh | 2 +-
+ .../w8a8/cutlass/c3x/scaled_mm_sm120_fp8_dispatch.cuh           | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 38af64851..8695650c6 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -101,7 +101,7 @@ if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
+    # starting from CUDA 12.9 and Blackwell (10.0), we use family-specific targets (10.0f, 12.0f, etc)
+    # to support the whole generation without specifying all sub-architectures
+    # see: https://developer.nvidia.com/blog/nvidia-blackwell-and-nvidia-cuda-12-9-introduce-family-specific-architecture-features/
+-  set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0")
++  set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0;12.1")
+ elseif(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
+    CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8)
+   set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;10.3;12.0;12.1")
+diff --git a/csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm.cuh b/csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm.cuh
+index e98433bed..952931103 100644
+--- a/csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm.cuh
++++ b/csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm.cuh
+@@ -202,7 +202,7 @@ struct cutlass_3x_gemm_sm120 {
+               sizeof(typename CollectiveEpilogue::SharedStorage))>,
+           KernelSchedule>::CollectiveOp;
+ 
+-  using GemmKernel = enable_sm120_only<cutlass::gemm::kernel::GemmUniversal<
++  using GemmKernel = enable_sm120_family<cutlass::gemm::kernel::GemmUniversal<
+       Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>>;
+ };
+ 
+diff --git a/csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_sm120_fp8_dispatch.cuh b/csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_sm120_fp8_dispatch.cuh
+index 245f5c10f..a2850c92c 100644
+--- a/csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_sm120_fp8_dispatch.cuh
++++ b/csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_sm120_fp8_dispatch.cuh
+@@ -72,7 +72,7 @@ struct cutlass_3x_gemm_sm120_custom {
+               sizeof(typename CollectiveEpilogue::SharedStorage))>,
+           KernelSchedule, void>::CollectiveOp;
+ 
+-  using GemmKernel = enable_sm120_only<cutlass::gemm::kernel::GemmUniversal<
++  using GemmKernel = enable_sm120_family<cutlass::gemm::kernel::GemmUniversal<
+       Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>>;
+ };
+ 
+-- 
+2.43.0
+

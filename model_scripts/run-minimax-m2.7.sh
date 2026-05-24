@@ -8,9 +8,13 @@
 #       EP is only for TP8+ or DP8+ configurations.
 # NOTE: --compilation-config with fuse_minimax_qk_norm uses CUDA IPC which does not
 #       work across multi-node setups. Use --enforce-eager instead.
-# NOTE: VLLM_DISABLED_KERNELS was previously set to CutlassFp8BlockScaledMMKernel
-#       but this kernel is required for FP8 MoE models like MiniMax-M2.7. Disabling
-#       it causes garbled/corrupted output.
+# NOTE: CutlassFp8BlockScaledMMKernel is required for FP8 MoE models like MiniMax-M2.7.
+#       Disabling it (via VLLM_DISABLED_KERNELS) causes garbled/corrupted output.
+#       This env var must be unset BEFORE starting Ray, not just before launching vLLM,
+#       because Ray inherits the environment of the shell that starts it.
+
+# Defensive: ensure no stale kernel overrides from previous debugging sessions
+unset VLLM_DISABLED_KERNELS
 
 export VLLM_IFACE=enp1s0f0np0
 export NCCL_SOCKET_IFNAME=$VLLM_IFACE

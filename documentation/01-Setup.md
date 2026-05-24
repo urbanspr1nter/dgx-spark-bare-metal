@@ -7,8 +7,14 @@
 Use the `vllm-install` skill script to install across all 4 nodes at once:
 
 ```bash
+# From a tag (standard release):
 ./agents/skills/vllm-install/scripts/install_cluster.sh v0.21.0
+
+# From a branch (e.g. a fork with patches):
+./agents/skills/vllm-install/scripts/install_cluster.sh v0.21.0-sm121-fix --branch
 ```
+
+The `--branch` flag skips the `git clean -fdx && git reset HEAD --hard` that would discard local commits. Use it when building from a branch that has patches not yet in an upstream release.
 
 This script will:
 
@@ -26,7 +32,11 @@ See the [vllm-install skill](../.agents/skills/vllm-install/SKILL.md) for full d
 To install on just one node (e.g., for testing), use the setup script directly:
 
 ```bash
+# From a tag:
 ./setup/install_vllm.sh $HOME/models v0.21.0
+
+# From a branch:
+./setup/install_vllm.sh $HOME/models v0.21.0-sm121-fix --branch
 ```
 
 The first argument is the parent directory — the repo gets cloned into `$1/vllm` and the venv lives at `$1/vllm/.venv`.
@@ -46,3 +56,12 @@ Then to wipe an existing vLLM install and start fresh:
 ```
 
 The first argument is the parent directory containing the `vllm/` repo. The second is the path to the virtual environment (needed to deactivate it first). Must be repeated on each node manually.
+
+## TORCH_CUDA_ARCH_LIST and DGX Spark
+
+The install script sets `TORCH_CUDA_ARCH_LIST="12.0 12.1"` which is required for DGX Spark (sm_121 / GB10). Both architectures are needed:
+
+- **`12.0`** — Required for kernels that use sm_120-only instructions (e.g. NVFP4/MXFP4 `e2m1x2`). Building with only `12.1` causes ptxas errors.
+- **`12.1`** — Required for native sm_121 cubins. Without these, CUTLASS FP8 block-scaled GEMM kernels fail at runtime on sm_121 hardware with `cutlass::Status::kErrorInternal`.
+
+Do not change this to `12.1a` or `12.1` alone.
