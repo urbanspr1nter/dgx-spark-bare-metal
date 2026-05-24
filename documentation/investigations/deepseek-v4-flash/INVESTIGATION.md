@@ -57,25 +57,19 @@ Each blocker was discovered incrementally: fix one, run the model, see what cras
 - MARLIN FP4 expert GEMMs appear to work on sm_121 (arch 12.0 cubins compiled)
 - Unconfirmed for full inference, but no immediate issues
 
-### Blocker #6: DeepGEMM MQA logits (sparse attention indexer) — 🔴 CONFIRMED
+### Blocker #6: DeepGEMM MQA logits (sparse attention indexer) — 🟡 Phase 6a/6b done; torch fallbacks in place
 
 - **Crash:** `RuntimeError: Assertion error (csrc/apis/attention.hpp:219): Unsupported architecture`
 - **Location:** `indexer.py:615 → get_paged_mqa_logits_metadata → deep_gemm.py:404`
 - **Root cause:** DeepGEMM's `get_paged_mqa_logits_metadata` C extension uses Hopper/Blackwell tensor core instructions and crashes on sm_121
 - **Impact:** Crashes during metadata build on first inference request, before any attention runs
-- **jasl/vllm fix:** SM12x dispatch in `deep_gemm.py` for `fp8_fp4_mqa_logits`, `fp8_fp4_paged_mqa_logits`, `fp8_fp4_mqa_topk_indices`; returns torch/Triton fallbacks on SM12x
-- **Also needs:** `_uses_deep_gemm_scheduler_metadata()` guard in `indexer.py` to skip DeepGEMM metadata path on SM12x; reduced `sparse_indexer_max_logits_bytes` (256MB vs 512MB); SM12x short-row top-k fallback in `sparse_attn_indexer.py`
+- **Fix (commit `0e3a811a0`):**
+  - **`deep_gemm.py` (+460 lines):** SM12x dispatch in `fp8_fp4_mqa_logits` → `_fp8_mqa_logits_torch` (chunked head-K matmul), `fp8_fp4_paged_mqa_logits` → `_fp8_paged_mqa_logits_torch` (per-batch paged KV gather + matmul), new `fp8_fp4_mqa_topk_indices` and `fp8_fp4_paged_mqa_topk_indices` for direct top-k without full logits, `_view_packed_fp8_paged_mqa_kv_cache` helper
+  - **`indexer.py` (+5/-4):** Guard `get_paged_mqa_logits_metadata` with `is_device_capability_family(120)` check
+  - **`sparse_attn_indexer.py` (+49/-39):** Import new top-k functions, prefill/decode try direct top-k before full logits, DeepGEMM init guard allows SM12x
+- **Remaining:** Phase 6c — Triton MQA logits kernels for performance (torch fallbacks are correct but slow)
 
 - Model selects `Using 'MARLIN' Mxfp4 MoE backend` — may work on sm_121 since arch 12.0 compiles NVFP4/MXFP4 kernels
-
-### Blocker #6: DeepGEMM MQA logits (sparse attention indexer) — 🔴 CONFIRMED
-
-- **Crash:** `RuntimeError: Assertion error (csrc/apis/attention.hpp:219): Unsupported architecture`
-- **Location:** `indexer.py:615 → get_paged_mqa_logits_metadata → deep_gemm.py:404`
-- **Root cause:** DeepGEMM's `get_paged_mqa_logits_metadata` C extension uses Hopper/Blackwell tensor core instructions and crashes on sm_121
-- **Impact:** Crashes during metadata build on first inference request, before any attention runs
-- **jasl/vllm fix:** SM12x dispatch in `deep_gemm.py` for `fp8_fp4_mqa_logits`, `fp8_fp4_paged_mqa_logits`, `fp8_fp4_mqa_topk_indices`; returns torch/Triton fallbacks on SM12x
-- **Also needs:** `_uses_deep_gemm_scheduler_metadata()` guard in `indexer.py` to skip DeepGEMM metadata path on SM12x; reduced `sparse_indexer_max_logits_bytes` (256MB vs 512MB); SM12x short-row top-k fallback in `sparse_attn_indexer.py`
 
 ## What works (confirmed by run logs)
 
