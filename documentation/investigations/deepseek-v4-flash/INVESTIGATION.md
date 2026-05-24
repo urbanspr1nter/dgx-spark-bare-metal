@@ -187,6 +187,92 @@ The jasl/vllm fork is based on an older vLLM (v0.20.1rc1), not v0.21.0. We need 
 - The `VLLM_DEEPSEEK_V4_USE_MEGA_MOE` flag allows forcing MegaMoE on if DeepGEMM is available, but it won't work on SM121.
 - The fork's base is v0.20.1rc1, which is older than our v0.21.0-sm121-fix. Some changes may conflict with our existing patches.
 
+## First run attempt on v0.21.0-sm121-fix (2025-05-24)
+
+Attempted to serve DS4-Flash on our 4× DGX Spark cluster with the current `v0.21.0-sm121-fix` branch (without any jasl/vllm patches). The model loaded successfully across all 4 workers (37.84 GiB per GPU), but crashed during the profile/dummy run with a single fatal error.
+
+### Crash: `mhc_pre` → `tf32_hc_prenorm_gemm` → DeepGEMM "Unsupported architecture"
+
+```
+File "vllm/model_executor/models/deepseek_v4.py", line 1213, in forward
+    x, post_mix, res_mix = self.hc_pre(
+File "vllm/model_executor/models/deepseek_v4.py", line 1179, in hc_pre
+    post_mix, res_mix, layer_input = torch.ops.vllm.mhc_pre(
+File "vllm/model_executor/layers/mhc.py", line 310, in mhc_pre
+    tf32_hc_prenorm_gemm(
+File "vllm/utils/deep_gemm.py", line 477, in tf32_hc_prenorm_gemm
+    return _tf32_hc_prenorm_gemm_impl(
+RuntimeError: Assertion error (csrc/apis/hyperconnection.hpp:56): Unsupported architecture
+```
+
+**Root cause:** The **Manifold-Constrained Hyper-Connection (mHC)** layer calls `torch.ops.vllm.mhc_pre()` which internally calls `tf32_hc_prenorm_gemm()` from DeepGEMM. This is a DeepGEMM C++ extension function (`_tf32_hc_prenorm_gemm_impl`) that asserts the GPU architecture is supported. On sm_121 (GB10), DeepGEMM's hyperconnection kernel has no implementation — it only supports sm_90 and sm_100.
+
+**This is the FIRST blocker encountered — not the MoE, not the attention, but mHC.** The model fails at the very first transformer layer's hyper-connection pre-norm, before it ever reaches attention or MoE.
+
+### What loaded successfully before the crash
+
+| Component | Status | Notes |
+|---|---|---|
+| Model weights | ✅ Loaded | 37.84 GiB per GPU, ~86-171s load time |
+| `CutlassFp8BlockScaledMMKernel` | ✅ Selected | For FP8 dense layers |
+| `deepseek_v4_fp8` quantization | ✅ Detected | `scale_fmt=ue8m0; enabling UE8M0 for DeepGEMM` |
+| Expert parallelism | ✅ Configured | 64 local / 256 global experts per rank, linear placement |
+| MXFP4 MoE backend | ✅ MARLIN selected | `Using 'MARLIN' Mxfp4 MoE backend` |
+| `fp8_ds_mla` KV cache | ✅ Activated | `Using DeepSeek's fp8_ds_mla KV cache format` |
+| FP8 indexer cache | ✅ Activated | `Using FP8 indexer cache for Lightning Indexer` |
+| NCCL | ✅ Working | Cross-node TP4 with custom all-reduce disabled |
+| SymmMemCommunicator | ⚠️ Not supported | `Device capability 12.1 not supported` (expected, non-fatal) |
+
+### The full list of sm_121 blockers (updated from this run)
+
+Now that we've seen the model actually attempt to run, the blockers are clear and ordered:
+
+**Blocker #1: mHC (Manifold-Constrained Hyper-Connection) — CRASH**
+- `tf32_hc_prenorm_gemm()` from DeepGEMM calls a C++ extension that asserts on architecture
+- This is the **first** thing called in every DS4-Flash transformer layer
+- DeepGEMM's `csrc/apis/hyperconnection.hpp:56` has `assert(arch == 90 || arch == 100)` (or similar)
+- **Fix needed:** Either (a) a Triton/PyTorch fallback for `mhc_pre` on SM12x (like jasl/vllm provides via tilelang), or (b) a native sm_121 implementation of the tf32 hc prenorm GEMM
+- **jasl/vllm approach:** Uses `tilelang` for the `mhc_pre_big_fuse` kernel (the post-GEMM fusion step), but still calls DeepGEMM's `tf32_hc_prenorm_gemm` for the actual GEMM. In their PR, they modified `vllm/utils/deep_gemm.py` to add SM12x fallback paths.
+
+**Blocker #2: DeepGEMM MQA logits (sparse attention indexer) — NOT YET HIT**
+- Would be the next failure after mHC is fixed
+- `fp8_fp4_mqa_logits` and `fp8_fp4_paged_mqa_logits` from DeepGEMM have no SM12x support
+- **Fix needed:** SM12x fallback (torch.einsum or Triton) — jasl/vllm provides this
+
+**Blocker #3: DeepGEMM FP8 einsum (compressor / inverse-RoPE) — NOT YET HIT**
+- `fp8_einsum` from DeepGEMM used for c4a/c128a attention operations
+- **Fix needed:** SM12x Triton einsum kernel — jasl/vllm provides `deepseek_v4_fp8_einsum`
+
+**Blocker #4: DeepGEMM MegaMoE (FP4 grouped GEMM) — NOT YET HIT**
+- `_grouped_fp4_impl` from DeepGEMM for fused expert computation
+- The model currently selects MARLIN as the MoE backend, which may or may not work
+- **Note:** The log shows `Using 'MARLIN' Mxfp4 MoE backend` — this is interesting. If MARLIN actually works for FP4 MoE on sm_121, this might not be a blocker at all.
+
+**Blocker #5: Triton sparse MLA (decode attention) — NOT YET HIT**
+- FlashMLA sparse uses DeepGEMM under the hood
+- **Fix needed:** Portable Triton sparse MLA decode path — jasl/vllm provides this
+
+### Important observation: MARLIN MoE backend selected
+
+The log shows:
+```
+Using 'MARLIN' Mxfp4 MoE backend.
+```
+
+This is notable because it means v0.21.0's MoE weight loading path chose MARLIN over DeepGEMM for the FP4 expert weights. If MARLIN actually has sm_121 support for MXFP4 (NVFP4) GEMMs, this could mean the MoE expert path works without DeepGEMM — we just haven't gotten far enough to test it. This aligns with the `TORCH_CUDA_ARCH_LIST="12.0 12.1"` requirement: arch 12.0 compiles NVFP4/MXFP4 kernels which MARLIN may use.
+
+### What this tells us about the porting strategy
+
+The crash happens at **layer 0, step 1** (mHC pre-norm). We don't even get to test attention or MoE. The porting priority is:
+
+1. **mHC fallback** — Must fix first. Without this, the model cannot take a single forward step.
+2. **DeepGEMM MQA logits fallback** — Needed for the sparse attention indexer.
+3. **DeepGEMM FP8 einsum fallback** — Needed for c4a/c128a compressed attention.
+4. **Triton sparse MLA** — Needed for decode-time attention.
+5. **MoE path** — May already work via MARLIN; needs testing once blockers 1-4 are cleared.
+
+This confirms that cherry-picking from jasl/vllm is the right approach. The question is how to do it cleanly onto v0.21.0.
+
 ## Current run script
 
 `model_scripts/run-deepseek-v4-flash.sh` — currently has `--enforce-eager` and `VLLM_DISABLED_KERNELS` is NOT set (good). DeepGEMM install script is at `model_scripts/deepseek-v4-flash-prereq/deepgemm-install.sh`.
