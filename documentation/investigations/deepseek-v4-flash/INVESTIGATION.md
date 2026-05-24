@@ -22,11 +22,22 @@ vLLM's DS4-Flash implementation targets **Hopper (sm_90) and Blackwell (sm_100)*
 DeepGEMM is the only backend that supports FP4 MoE weights. It is required for DS4-Flash.
 
 - **`support_deep_gemm()`** in `vllm/platforms/cuda.py` only returns True for `is_device_capability(90) or is_device_capability_family(100)`
-- **DeepGEMM itself** hardcodes `CUDA_ARCH_LIST="9.0"` in its CMakeLists.txt and only has heuristic configs for `sm90.hpp` and `sm100.hpp`
-- DeepGEMM uses Hopper-specific tensor core instructions (wgmma) that do not exist on sm_121
-- The install script at `model_scripts/deepseek-v4-flash-prereq/deepgemm-install.sh` would build but produce non-functional kernels
+- **DeepGEMM 2.5.0 is installed** on all nodes but is non-functional on sm_121
+- The compiled `_C.so` has sm_120 cubins but **not sm_121** — those cubins come from bundled CUTLASS, not DeepGEMM's own kernels
+- DeepGEMM's own GEMM kernels are arch-specific:
+  - `sm90_fp8_gemm_1d1d.cuh` — uses Hopper `WGMMA` instructions (`#if __CUDA_ARCH__ >= 900`)
+  - `sm100_*.cuh` — uses Blackwell `UMMA` instructions (`#if __CUDA_ARCH__ >= 1000`)
+  - Both contain runtime assertions: `"This kernel only support sm_90a"` / `"This kernel only support sm_100f"`
+  - **No sm120/sm121 implementations exist** in DeepGEMM 2.5.0
+- This is not just a compile guard issue — DeepGEMM fundamentally relies on Hopper WGMMA or Blackwell UMMA tensor core instructions that do not exist on sm_121 (GB10 uses a different tensor core ISA)
+- The install script at `model_scripts/deepseek-v4-flash-prereq/deepgemm-install.sh` installed DeepGEMM but it cannot run on GB10
 
-**Impact:** Without DeepGEMM, FP4 MoE expert GEMMs cannot run. This is a hard blocker — no other MoE backend supports FP4 weights.
+**Impact:** Without DeepGEMM, FP4 MoE expert GEMMs cannot run. This is a hard blocker — no other MoE backend in vLLM supports FP4 weights.
+
+**Possible paths forward:**
+- Wait for DeepGEMM upstream to add sm_120 family support (they bundle CUTLASS headers that include sm120 kernels, so the foundation exists)
+- Use a different FP4 MoE kernel backend (e.g., CUTLASS sm120 GEMM kernels adapted for grouped MoE)
+- Fall back to dequantizing FP4 weights to FP8 and using the existing `CutlassFp8BlockScaledMMKernel` / TRITON MoE path (would increase memory usage but might work)
 
 ### 2. FlashInfer — used for compressed attention kernels
 
