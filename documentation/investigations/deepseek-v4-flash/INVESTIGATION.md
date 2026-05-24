@@ -135,23 +135,91 @@ Both crash on sm_121. jasl/vllm replaces them with portable Triton kernels on SM
 - `build_combined_sparse_mla_decode_valid_mask` produces correct masks
 - `sparse_prefill_combined_topk_size` returns correct aligned sizes
 
-### Phase 3: Attention dispatch integration (~700 lines diff)
+### Phase 3: Attention dispatch integration
 
 **Goal:** Wire the Triton sparse MLA kernels into `deepseek_v4_attention.py` so that on SM12x, `_forward_decode` and `_forward_prefill` use the Triton path instead of FlashMLA.
 
-**Files to modify:**
-- **Modify** `vllm/model_executor/layers/deepseek_v4_attention.py` (~694 changed lines from jasl)
-  - Import `sparse_mla_kernels` and `sparse_mla_env`
-  - Add `_forward_sparse_mla_swa_decode_triton()` — SWA-only decode via Triton
-  - Add `_forward_sparse_mla_compressed_decode_triton()` — c4a/c128a decode via Triton
-  - Modify `_forward_decode()` — dispatch to Triton on SM12x before FlashMLA
-  - Modify `_forward_prefill()` — add Triton chunked prefill path
-  - Modify `__init__()` — call `disable_triton_sparse_mla_cudagraphs_if_enabled()`
-  - Modify `get_kv_cache_spec()` — adjust alignment for Triton MLA (576 → variable)
-- **Modify** `vllm/v1/attention/backends/mla/sparse_swa.py` (~47 changed lines) — sink-aware SWA additions
-- **Modify** `vllm/v1/attention/backends/mla/flashmla_sparse.py` (~18 changed lines) — CUDA graph guard
+This is the hardest phase despite being the smallest in lines — it touches `deepseek_v4_attention.py` which has diverged significantly between jasl's v0.20.1 and our v0.21.0. Broken into 4 testable sub-phases:
 
-**Test:** Run DS4-Flash with the Triton sparse MLA path. Decode attention should work. Verify output is not garbled.
+#### Phase 3a: Infrastructure & helpers (~50 lines)
+
+The plumbing needed before any Triton paths can work. No runtime behavior change.
+
+**Files to modify:**
+- **Modify** `vllm/model_executor/layers/deepseek_v4_attention.py`
+  - Import `sparse_mla_env` (6 functions) and `sparse_mla_kernels` (9 functions)
+  - Import `dequantize_combined_sparse_mla_decode_kv` and `sparse_prefill_combined_topk_size` from `deepseek_v4_ops`
+  - Add `disable_triton_sparse_mla_cudagraphs_if_enabled()` call in `DeepseekV4MLAAttentionWrapper.__init__`
+  - Add `_reserve_prefill_workspace` method on `DeepseekV4MLAAttention` — replaces inline workspace reservation in dummy-run path; also reserves Triton state buffers (max_score, denom, acc) when SM12x is detected
+  - Add `_prefill_workspace_topk_bound` helper — derives topk bound from `topk_indices_buffer` or `indexer.topk_tokens`
+  - Add `_prefill_workspace_reservation_specs` helper — returns workspace tensor specs for both FlashMLA and Triton paths
+  - Minor: `_deepseek_v4_fp8_einsum_config` refactor, `_allocate_deepseek_v4_wo_a_output` helper, move `_DEFAULT_SPARSE_MLA_TOPK_TOKENS` constant
+- **Modify** `vllm/v1/attention/backends/mla/sparse_swa.py`
+  - Import `sparse_mla_env` functions
+  - Add `prefill_seq_lens_cpu` and `prefill_gather_lens_cpu` fields to `DeepseekSparseSWAMetadata`
+  - Add `get_cudagraph_support` override on `DeepseekV4SWACache` — returns `NEVER` when DS4 + Triton MLA + CUDA graphs disabled
+  - Compute and store `prefill_seq_lens_cpu` / `prefill_gather_lens_cpu` in `DeepseekSparseSWAMetadataBuilder.build()`
+  - Early-return from FlashMLA decode planner when Triton MLA is enabled (skip FlashMLA tile scheduler)
+- **Modify** `vllm/v1/attention/ops/deepseek_v4_ops/cache_utils.py`
+  - Add optional `combined_indices` and `combined_lens` output buffer parameters to `combine_topk_swa_indices` — avoids re-allocation in prefill loop when Triton MLA provides pre-allocated buffers
+  - Use `sparse_prefill_combined_topk_size` for combined_topk calculation (was inline)
+
+**Test:** Import only — verify no import errors or initialization crashes.
+
+#### Phase 3b: SWA decode path (~70 lines new)
+
+The simplest decode path — SWA-only layers (compress_ratio ≤ 1). Two sub-paths:
+
+1. **Non-MTP** (1 token per seq): single kernel call `fp8ds_paged_sparse_mla_attention_with_sink_multihead`
+2. **MTP** (multi-token per seq): chunked `accumulate_fp8ds_global_slots_sparse_mla_attention_chunk_multihead` + `finish_sparse_mla_attention_with_sink`
+
+**Files to modify:**
+- **Modify** `vllm/model_executor/layers/deepseek_v4_attention.py`
+  - Add `_forward_sparse_mla_swa_decode_triton` method on `DeepseekV4MLAAttention`
+  - Add dispatch in `_forward_decode`: `if is_triton_sparse_mla_enabled(q.device) and swa_only: → triton path; return`
+
+**Test:** Run DS4-Flash — SWA-only layers (first 3 layers) should decode without FlashMLA crash.
+
+#### Phase 3c: Compressed decode path (~170 lines new)
+
+The most complex decode path — c4a/c128a layers with compressed attention. Three sub-paths selected at runtime:
+
+1. **Matmul decode** (small batch, `triton_sparse_mla_matmul_decode_enabled()`): dequantize all KV into combined buffer via `dequantize_combined_sparse_mla_decode_kv`, compute `matmul_sparse_mla_attention_with_sink`. Best for ≤16 decode tokens.
+2. **Fused kernel** (single topk chunk, non-MTP): `fp8ds_global_paged_sparse_mla_attention_with_sink_multihead` — handles compressed + SWA in one kernel launch.
+3. **Chunked fallback** (large topk or MTP): chunked `accumulate_fp8ds_global_slots_sparse_mla_attention_chunk_multihead` for compressed + `accumulate_fp8ds_paged_sparse_mla_attention_chunk_multihead` for SWA, then `finish_two_sparse_mla_attention_states_with_sink`.
+
+**Files to modify:**
+- **Modify** `vllm/model_executor/layers/deepseek_v4_attention.py`
+  - Add `_forward_sparse_mla_compressed_decode_triton` method on `DeepseekV4MLAAttention`
+  - Add dispatch in `_forward_decode`: `if compress_ratio in (4, 128): → compressed triton path; return`
+  - Add workspace allocations via `current_workspace_manager().get_simultaneous(...)` for matmul decode (combined_kv, valid_tokens, score_buffer) and chunked fallback (6 float32 buffers)
+
+**Test:** Run DS4-Flash — c4a/c128a layers should decode. Verify output is coherent (not garbled).
+
+**Key risk:** The matmul decode path (`dequantize_combined_sparse_mla_decode_kv` + `matmul_sparse_mla_attention_with_sink`) has not been tested end-to-end with real DS4-Flash cache data. The fused and chunked paths were unit-tested in Phase 2 but not with real cache layouts.
+
+#### Phase 3d: Prefill path (~100 lines changed/added)
+
+Prefill path with Triton chunked attention. Replaces `flash_mla_sparse_fwd` with `accumulate_indexed_sparse_mla_attention_chunk` + `finish_sparse_mla_attention_with_sink`.
+
+**Files to modify:**
+- **Modify** `vllm/model_executor/layers/deepseek_v4_attention.py`
+  - Add `_forward_sparse_mla_prefill_triton` method on `DeepseekV4MLAAttention` — double-nested loop: outer over query chunks (`query_chunk_size`), inner over index chunks (`topk_chunk_size`)
+  - Add `_sparse_mla_prefill_workspace_bounds` helper — computes N and M from actual seq_lens/gather_lens instead of max_model_len (more accurate workspace sizing)
+  - Add `_sparse_mla_prefill_gather_len_upper_bound` helper — upper bound for workspace reservation during profiling
+  - Modify `_forward_prefill` — reserve workspace with Triton state buffers when SM12x, pass pre-allocated `combined_indices_buffer`/`combined_lens_buffer` to `combine_topk_swa_indices`, dispatch to `_forward_sparse_mla_prefill_triton` instead of `flash_mla_sparse_fwd`
+  - Modify dummy-run path to call `_reserve_prefill_workspace()`
+
+**Test:** Run DS4-Flash with a prompt — prefill should complete without FlashMLA crash.
+
+### Phase 3 risk summary
+
+| Sub-phase | Lines | Risk | Reason |
+|---|---|---|---|
+| 3a: Infrastructure | ~50 | Very low | Just plumbing, no runtime change |
+| 3b: SWA decode | ~70 | Low | Single kernel call for non-MTP, well-tested in Phase 2 |
+| 3c: Compressed decode | ~170 | Medium | 3 sub-paths, workspace management, topk_chunk_size tuning |
+| 3d: Prefill | ~100 | Medium | Chunked loop, buffer sizing, combine_topk_swa_indices interaction |
 
 ### Phase 4: MQA logits fallbacks (~1,300 lines)
 
@@ -189,16 +257,21 @@ Once all four phases are complete and the model serves tokens, verify that the M
 |---|---|---|---|
 | 1. Env detection | ~150 | ~50 | Low |
 | 2. Triton kernels | ~2,940 | ~0 | High (Triton math) |
-| 3. Dispatch integration | ~0 | ~700 | High (API coupling) |
+| 3a. Infrastructure & helpers | ~30 | ~20 | Very low |
+| 3b. SWA decode | ~70 | ~5 | Low |
+| 3c. Compressed decode | ~170 | ~10 | Medium |
+| 3d. Prefill | ~60 | ~40 | Medium |
 | 4. MQA logits fallbacks | ~1,130 | ~700 | Medium |
-| **Total** | ~4,220 | ~1,450 | — |
+| **Total** | ~4,550 | ~1,525 | — |
 
 ### Key risks
 
-- **v0.20.1 → v0.21.0 API drift:** jasl's fork is based on v0.20.1rc1. The `deepseek_v4_attention.py` diff (694 lines) is the riskiest — many changes are intertwined with other v0.20.1→v0.21.0 differences.
+- **v0.20.1 → v0.21.0 API drift:** jasl's fork is based on v0.20.1rc1. The `deepseek_v4_attention.py` diff (694 lines) is the riskiest — many changes are intertwined with other v0.20.1→v0.21.0 differences. Sub-phasing Phase 3 mitigates this: each sub-phase can be tested independently.
 - **SM120 vs SM121:** jasl tested on RTX PRO 6000 (SM120). Triton kernels should work on both, but SM121-specific testing is needed.
 - **`sparse_mla_kernels.py` is the biggest file** (2,694 lines). Mostly pure Triton math with minimal vLLM API coupling, which makes it the safest large port.
-- **Phase 3 (dispatch) is the hardest** despite being the smallest in lines — it touches `deepseek_v4_attention.py` which has diverged significantly between v0.20.1 and v0.21.0.
+- **Phase 3c (compressed decode) is the riskiest sub-phase** — 3 runtime sub-paths (matmul/fused/chunked), workspace management, and `dequantize_combined_sparse_mla_decode_kv` has not been tested end-to-end with real DS4-Flash cache data.
+- **Phase 3d (prefill) workspace sizing** — `_sparse_mla_prefill_workspace_bounds` computes workspace from actual batch metadata rather than max_model_len, which is more accurate but could undersize if metadata is incorrect.
+- **`prefill_seq_lens_cpu` / `prefill_gather_lens_cpu`** — new fields on `DeepseekSparseSWAMetadata` must be computed correctly during metadata build; incorrect values would cause Triton prefill to read wrong KV entries.
 
 ### Approach: write our own code, use jasl as reference
 
