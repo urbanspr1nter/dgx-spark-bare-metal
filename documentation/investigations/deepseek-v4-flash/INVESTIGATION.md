@@ -91,21 +91,23 @@ The FlashMLA C extension provides two functions used by DS4-Flash attention:
 
 Both crash on sm_121. jasl/vllm replaces them with portable Triton kernels on SM12x. The port is structured in 4 phases:
 
-### Phase 1: Environment detection + guard infrastructure (~150 lines)
+### Phase 1: Environment detection + guard infrastructure — ✅ DONE (commit `4b23c8309`)
 
 **Goal:** Add SM12x detection and env var controls so the codebase knows when to use Triton sparse MLA instead of FlashMLA.
 
-**Files to create/modify:**
-- **Create** `vllm/v1/attention/backends/mla/sparse_mla_env.py` (150 lines) — from jasl
-  - `is_triton_sparse_mla_enabled_for_platform()` — returns True on SM12x
+**Files created/modified:**
+- **Created** `vllm/v1/attention/backends/mla/sparse_mla_env.py` (223 lines)
+  - `is_triton_sparse_mla_enabled_for_platform()` — auto-enables on SM12x
   - `is_triton_sparse_mla_enabled(device)` — per-device check
-  - `triton_sparse_mla_matmul_decode_enabled()` — matmul decode toggle
+  - `triton_sparse_mla_matmul_decode_enabled()` — matmul vs gather decode toggle (auto on SM12x)
   - `triton_sparse_mla_topk_chunk_size()` / `query_chunk_size()` / `head_block_size()` — tuning knobs
-  - `disable_triton_sparse_mla_cudagraphs_if_enabled()` — CUDA graph compat
-- **Modify** `vllm/envs.py` — add env var definitions (`VLLM_TRITON_MLA_SPARSE`, etc.)
-- **Modify** `vllm/v1/attention/backends/mla/flashmla_sparse.py` (~18 lines) — add SM12x guard for CUDA graphs
+  - `triton_sparse_mla_cudagraphs_allowed()` — respects env var + speculative decoding
+  - `disable_triton_sparse_mla_cudagraphs_if_enabled()` — disables CUDA graphs for Triton MLA when speculative decoding is configured
+  - 6 env vars: `VLLM_TRITON_MLA_SPARSE` (auto), `TOPK_CHUNK_SIZE` (512), `QUERY_CHUNK_SIZE` (256), `ALLOW_CUDAGRAPH` (true), `HEAD_BLOCK_SIZE` (auto), `MATMUL_DECODE` (auto)
+- **Modified** `vllm/envs.py` (+37 lines) — 6 dataclass fields + 6 environment_variables entries
+- **Modified** `vllm/v1/attention/backends/mla/flashmla_sparse.py` (+18 lines) — `get_cudagraph_support()` override on `FlashMLASparseMetadataBuilder`: returns `NEVER` when DS4 + Triton MLA + speculative decoding
 
-**Test:** Import and call `is_triton_sparse_mla_enabled_for_platform()` on sm_121, verify it returns True.
+**Tests passed:** auto-detection on sm_121, force-enable/disable via env var, CUDA graph guard with/without speculative decoding, default tuning knobs.
 
 ### Phase 2: Triton sparse MLA kernels (~2,700 lines)
 
