@@ -1,6 +1,6 @@
 # DeepSeek-V4-Flash on DGX Spark (sm_121 / GB10)
 
-## Status: In Progress — Blockers #1–#3 fixed; Blocker #4 (FlashMLA) Phase 3 complete; Phase 4 (MQA logits) next
+## Status: In Progress — Blockers #1–#3 fixed; Blocker #4 (FlashMLA) Phase 3 complete; Blocker #6 (MQA logits) confirmed; end-to-end test pending
 
 **Goal:** Serve DeepSeek-V4-Flash (284B MoE, 13B active params) on a 4× DGX Spark cluster.
 
@@ -51,14 +51,31 @@ Each blocker was discovered incrementally: fix one, run the model, see what cras
 - **Impact:** Model loads, completes dummy forward pass, allocates KV caches, crashes on first inference request
 - **This is the largest remaining blocker.** Requires porting ~3,500 lines of portable Triton sparse MLA from jasl/vllm.
 
-### Blocker #5: MARLIN MoE backend — ❓ UNKNOWN (untestable until #4 fixed)
+### Blocker #5: MARLIN MoE backend — ✅ NOT A BLOCKER
+
+- Model selects `Using 'MARLIN' Mxfp4 MoE backend` at startup — no crash observed
+- MARLIN FP4 expert GEMMs appear to work on sm_121 (arch 12.0 cubins compiled)
+- Unconfirmed for full inference, but no immediate issues
+
+### Blocker #6: DeepGEMM MQA logits (sparse attention indexer) — 🔴 CONFIRMED
+
+- **Crash:** `RuntimeError: Assertion error (csrc/apis/attention.hpp:219): Unsupported architecture`
+- **Location:** `indexer.py:615 → get_paged_mqa_logits_metadata → deep_gemm.py:404`
+- **Root cause:** DeepGEMM's `get_paged_mqa_logits_metadata` C extension uses Hopper/Blackwell tensor core instructions and crashes on sm_121
+- **Impact:** Crashes during metadata build on first inference request, before any attention runs
+- **jasl/vllm fix:** SM12x dispatch in `deep_gemm.py` for `fp8_fp4_mqa_logits`, `fp8_fp4_paged_mqa_logits`, `fp8_fp4_mqa_topk_indices`; returns torch/Triton fallbacks on SM12x
+- **Also needs:** `_uses_deep_gemm_scheduler_metadata()` guard in `indexer.py` to skip DeepGEMM metadata path on SM12x; reduced `sparse_indexer_max_logits_bytes` (256MB vs 512MB); SM12x short-row top-k fallback in `sparse_attn_indexer.py`
 
 - Model selects `Using 'MARLIN' Mxfp4 MoE backend` — may work on sm_121 since arch 12.0 compiles NVFP4/MXFP4 kernels
 
-### Blocker #6: DeepGEMM MQA logits (sparse attention indexer) — ❓ UNKNOWN
+### Blocker #6: DeepGEMM MQA logits (sparse attention indexer) — 🔴 CONFIRMED
 
-- May be hit depending on decode path after Triton sparse MLA is integrated
-- jasl/vllm provides torch.einsum + Triton fallbacks
+- **Crash:** `RuntimeError: Assertion error (csrc/apis/attention.hpp:219): Unsupported architecture`
+- **Location:** `indexer.py:615 → get_paged_mqa_logits_metadata → deep_gemm.py:404`
+- **Root cause:** DeepGEMM's `get_paged_mqa_logits_metadata` C extension uses Hopper/Blackwell tensor core instructions and crashes on sm_121
+- **Impact:** Crashes during metadata build on first inference request, before any attention runs
+- **jasl/vllm fix:** SM12x dispatch in `deep_gemm.py` for `fp8_fp4_mqa_logits`, `fp8_fp4_paged_mqa_logits`, `fp8_fp4_mqa_topk_indices`; returns torch/Triton fallbacks on SM12x
+- **Also needs:** `_uses_deep_gemm_scheduler_metadata()` guard in `indexer.py` to skip DeepGEMM metadata path on SM12x; reduced `sparse_indexer_max_logits_bytes` (256MB vs 512MB); SM12x short-row top-k fallback in `sparse_attn_indexer.py`
 
 ## What works (confirmed by run logs)
 
@@ -76,8 +93,10 @@ Each blocker was discovered incrementally: fix one, run the model, see what cras
 | Expert parallelism | ✅ | 64 local / 256 global experts per rank |
 | KV cache memory computation | ✅ | ~67.5 GiB per GPU |
 | Dummy forward pass | ✅ | Completes successfully on all 4 nodes |
-| Decode attention | ❌ | FlashMLA not compiled for sm_121 |
-| MoE expert GEMM | ❓ | MARLIN selected but untested |
+| Decode attention | 🟡 | Triton MLA path compiles and runs; FlashMLA fallthrough crash on some workers (cascading from indexer?) |
+| Prefill attention | 🟡 | Triton MLA path compiles and runs on TP0; FlashMLA fallthrough on other workers (needs investigation) |
+| MoE expert GEMM | ✅ | MARLIN selected, no crash observed |
+| Indexer (MQA logits) | ❌ | DeepGEMM `get_paged_mqa_logits_metadata` crashes on sm_121 — Blocker #6 |
 
 ## GPU OOM note
 
@@ -209,6 +228,48 @@ This is the hardest phase despite being the smallest in lines — it touches `de
     - ROCm and FlashMLA paths unchanged
 
 **Test:** Method implemented, imports verified. End-to-end test requires running DS4-Flash.
+
+### Phase 3 end-to-end test results
+
+Ran DS4-Flash with `--enforce-eager --enable-expert-parallel` on 4× DGX Spark (TP4).
+
+**Startup:** ✅ All 4 workers loaded successfully.
+- `CutlassFp8BlockScaledMMKernel` selected for FP8 dense layers
+- `fp8_ds_mla KV cache format` active
+- `FP8 indexer cache for Lightning Indexer` active
+- `MARLIN Mxfp4 MoE backend` selected (Blocker #5 cleared)
+- `sparse_mla_env.py:195` — Triton MLA env detection active: *"Keeping vLLM compile and CUDA graphs enabled for the DeepSeek V4 Triton sparse MLA path"*
+- KV cache: 9.3M tokens, ~62 GiB per GPU
+
+**First inference request:** ❌ Two crashes on different code paths.
+
+**Crash 1 — Blocker #6 (MQA logits metadata):**
+```
+indexer.py:615 → get_paged_mqa_logits_metadata → deep_gemm.py:404
+RuntimeError: Assertion error (csrc/apis/attention.hpp:219): Unsupported architecture
+```
+DeepGEMM's `get_paged_mqa_logits_metadata` C extension crashes on sm_121. This is called during the indexer's metadata build phase, before any attention runs. This is the **primary blocker** — it prevents any inference from completing.
+
+**Crash 2 — FlashMLA prefill fallthrough (secondary):**
+```
+deepseek_v4_attention.py:1098 → flash_mla_sparse_fwd
+RuntimeError: vllm._flashmla_C is not available
+```
+The prefill path fell through to `flash_mla_sparse_fwd` on some workers instead of the Triton path. This is likely a cascading failure from the indexer crash (the indexer crash may corrupt metadata state, causing the Triton dispatch check to fail). Alternatively, it could be a prefill-only layer (SWA-only with `attn_metadata is None`) that doesn't enter the Triton path. Needs investigation after Blocker #6 is fixed.
+
+**Triton kernel JIT compilations observed (TP0):**
+- `_compute_slot_mapping_kernel` — cache insertion
+- `_compressed_slot_mapping_kernel` — compressed cache insertion
+- `_build_prefill_chunk_metadata_kernel` — prefill metadata
+- `_compute_prefill_metadata_kernel` — SWA prefill metadata
+- `_dequantize_and_gather_k_kernel` — KV gather for prefill
+- `_combine_topk_swa_indices_kernel` — topk+SWA index combination
+- `_sm12x_fp8_einsum_kernel` — O-projection einsum (Blocker #3 fix)
+- `_accumulate_indexed_attention_chunk_kernel` — Triton sparse MLA prefill
+- `_finish_attention_state_with_sink_kernel` — Triton sparse MLA finish
+- `mhc_fused_tilelang` — mHC post-GEMM fusion (Blocker #1 fix)
+
+This confirms that **Blockers #1–#4 code paths are being exercised**. The Triton MLA prefill path ran on at least one worker before the indexer crash propagated.
 
 ### Phase 3 risk summary
 
