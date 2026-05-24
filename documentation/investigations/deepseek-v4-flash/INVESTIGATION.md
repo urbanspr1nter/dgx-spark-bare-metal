@@ -109,19 +109,31 @@ Both crash on sm_121. jasl/vllm replaces them with portable Triton kernels on SM
 
 **Tests passed:** auto-detection on sm_121, force-enable/disable via env var, CUDA graph guard with/without speculative decoding, default tuning knobs.
 
-### Phase 2: Triton sparse MLA kernels (~2,700 lines)
+### Phase 2: Triton sparse MLA kernels — ✅ DONE (commit `f6c9dca92`)
 
 **Goal:** Port the portable Triton kernels that replace FlashMLA for decode and prefill attention.
 
-**Files to create:**
-- **Create** `vllm/v1/attention/backends/mla/sparse_mla_kernels.py` (2,694 lines) — from jasl
+**Files created/modified:**
+- **Created** `vllm/v1/attention/backends/mla/sparse_mla_kernels.py` (2,694 lines)
+  - 17 public functions covering all decode/prefill/accumulate/finish/merge paths
   - Decode kernels: `fp8ds_paged_sparse_mla_attention_with_sink_multihead`, `fp8ds_global_paged_sparse_mla_attention_with_sink_multihead`, `matmul_sparse_mla_attention_with_sink`
-  - Prefill kernels: `accumulate_fp8ds_global_slots_sparse_mla_attention_chunk_multihead`, `accumulate_indexed_sparse_mla_attention_chunk`, `build_combined_sparse_mla_decode_valid_mask`, `finish_sparse_mla_attention_with_sink`, `finish_two_sparse_mla_attention_states_with_sink`
-  - Helper: `sparse_mla_decode_head_block_size`, `dequantize_combined_sparse_mla_decode_kv`
-- **Create** `vllm/v1/attention/backends/mla/sparse_mla_reference.py` (242 lines) — from jasl
-  - Reference implementation for correctness testing
+  - Accumulate: `accumulate_fp8ds_global_slots_sparse_mla_attention_chunk_multihead`, `accumulate_fp8ds_paged_sparse_mla_attention_chunk_multihead`, `accumulate_indexed_sparse_mla_attention_chunk`, `accumulate_gathered_sparse_mla_attention_chunk`
+  - Finish: `finish_sparse_mla_attention_with_sink`, `finish_two_sparse_mla_attention_states_with_sink`, `finish_gathered_sparse_mla_attention`, `finish_materialized_sparse_mla_scores_with_sink`
+  - Merge: `merge_two_sparse_mla_subsets_with_sink`, `merge_sparse_mla_subset_with_sink`
+  - Utility: `sparse_mla_decode_head_block_size`, `build_combined_sparse_mla_decode_valid_mask`
+- **Created** `vllm/v1/attention/backends/mla/sparse_mla_reference.py` (242 lines) — pure-PyTorch reference for correctness testing
+- **Modified** `vllm/v1/attention/ops/deepseek_v4_ops/cache_utils.py` (+169 lines) — added `dequantize_global_slots_k_cache`, `dequantize_combined_sparse_mla_decode_kv`, `sparse_prefill_combined_topk_size`
+- **Modified** `vllm/v1/attention/ops/deepseek_v4_ops/__init__.py` — exported new cache_utils functions
 
-**Test:** Import kernels, run a small decode attention test with known inputs to verify numerical correctness.
+**Tests passed on sm_121:**
+- All 17 kernel functions import and JIT-compile on sm_121
+- finish/merge kernels match reference within float tolerance (~5e-7)
+- `matmul_sparse_mla_attention_with_sink` matches reference exactly
+- FP8 paged/global-slot attention kernels produce valid non-NaN output
+- Dequantize kernels produce correct FP8→bf16 and bf16 RoPE values
+- Negative slot IDs correctly zero-fill
+- `build_combined_sparse_mla_decode_valid_mask` produces correct masks
+- `sparse_prefill_combined_topk_size` returns correct aligned sizes
 
 ### Phase 3: Attention dispatch integration (~700 lines diff)
 
