@@ -1,6 +1,8 @@
 # DeepSeek-V4-Flash on DGX Spark (sm_121 / GB10)
 
-## Status: In Progress — Blockers #1–#3 fixed; Blocker #4 (FlashMLA) Phase 3 complete; Blocker #6 (MQA logits) confirmed; end-to-end test pending
+## Status: ✅ SERVING — DeepSeek-V4-Flash running on 4× DGX Spark (sm_121 / GB10)
+
+All 6 blockers resolved. Model produces coherent output. Torch fallbacks for MQA logits are functional but slow — Phase 6c (Triton kernels) will improve decode throughput.
 
 **Goal:** Serve DeepSeek-V4-Flash (284B MoE, 13B active params) on a 4× DGX Spark cluster.
 
@@ -57,7 +59,7 @@ Each blocker was discovered incrementally: fix one, run the model, see what cras
 - MARLIN FP4 expert GEMMs appear to work on sm_121 (arch 12.0 cubins compiled)
 - Unconfirmed for full inference, but no immediate issues
 
-### Blocker #6: DeepGEMM MQA logits (sparse attention indexer) — 🟡 Phase 6a/6b done; torch fallbacks in place
+### Blocker #6: DeepGEMM MQA logits (sparse attention indexer) — ✅ FIXED
 
 - **Crash:** `RuntimeError: Assertion error (csrc/apis/attention.hpp:219): Unsupported architecture`
 - **Location:** `indexer.py:615 → get_paged_mqa_logits_metadata → deep_gemm.py:404`
