@@ -23,56 +23,48 @@ Each blocker was discovered incrementally: fix one, run the model, see what cras
 - **Location:** First thing called in every DS4-Flash transformer layer (`deepseek_v4.py:1213`)
 - **Fix (commit `ffabca2e3`):**
   - SM12x dispatch check in `vllm/utils/deep_gemm.py` — routes to fallback on `is_device_capability_family(120)`
-  - Triton split-K kernel (`tf32_hc_prenorm_gemm_triton` in `vllm/model_executor/layers/deepseek_v4_triton_kernels.py`) — primary path
+  - Triton split-K kernel (`tf32_hc_prenorm_gemm_triton` in `deepseek_v4_triton_kernels.py`) — primary path
   - Pure torch.matmul fallback (`_tf32_hc_prenorm_gemm_torch`) — writes full result to split-0
-  - Post-GEMM fusion (`mhc_pre_big_fuse_tilelang`) already works on sm_121 via tilelang — no changes needed
+  - Post-GEMM fusion (`mhc_pre_big_fuse_tilelang`) already works on sm_121 via tilelang
 - **Verified:** Full mHC pipeline produces correct Sinkhorn-normalized outputs on sm_121
 
 ### Blocker #2: UE8M0 ScalarType in cutlass_scaled_mm — ✅ FIXED
 
-- **Crash:** `RuntimeError: Not yet supported ScalarType 44` — DS4-Flash uses `scale_fmt=ue8m0` (float8_e8m0fnu) for FP8 weight scales, but the C++ `cutlass_scaled_mm` op doesn't support this dtype
-- **Location:** Attention Wq/Wk/Wv projection (`BlockScaledMMLinearKernel.apply_block_scaled_mm → cutlass_scaled_mm`)
-- **Root cause:** MiniMax-M2.7 uses Float32 block scales with the same kernel, so ScalarType 44 was never hit before
-- **Fix (commit `78bf5cda7`):**
-  - Added `process_weights_after_loading` in `CutlassFp8BlockScaledMMKernel` that upcasts UE8M0 scales to float32 using existing `_upcast_e8m0_to_fp32` helper
-  - Lossless conversion: UE8M0 values are always exact powers of 2, so float32 representation is exact
-  - Simpler than jasl/vllm's approach which disables `CutlassFp8BlockScaledMMKernel` entirely on SM12x
+- **Crash:** `RuntimeError: Not yet supported ScalarType 44` — DS4-Flash uses `scale_fmt=ue8m0` (float8_e8m0fnu) for FP8 weight scales
+- **Location:** Attention Wq/Wk/Wv projection
+- **Fix (commit `78bf5cda7`):** `process_weights_after_loading` in `CutlassFp8BlockScaledMMKernel` upcasts UE8M0 → float32 at load time using `_upcast_e8m0_to_fp32`
 
 ### Blocker #3: DeepGEMM FP8 einsum (O-projection inverse-RoPE) — ✅ FIXED
 
-- **Crash:** `RuntimeError: Assertion error (layout.hpp:39): t.dim() == N` — DeepGEMM's `fp8_einsum` layout assertions fail on SM12x
-- **Location:** Attention O-projection (`deepseek_v4_attention.py:344 → deepseek_v4_fp8_einsum → fp8_einsum`)
-- **Additional bug:** `_einsum_recipe` was `(1, 1, 128)` with `tma_aligned_scales=True` on SM12x (SM100 settings) — should be `(1, 128, 128)` with `False`
+- **Crash:** `RuntimeError: Assertion error (layout.hpp:39): t.dim() == N` — DeepGEMM layout assertions fail on SM12x
+- **Location:** Attention O-projection (`deepseek_v4_fp8_einsum → fp8_einsum`)
+- **Additional bug fixed:** `_einsum_recipe` was `(1, 1, 128)` / `tma_aligned_scales=True` on SM12x (SM100 settings) → corrected to `(1, 128, 128)` / `False`
 - **Fix (commit `648b521fe`):**
   - New Triton kernel `deepseek_v4_sm12x_fp8_einsum` in `vllm/v1/attention/ops/deepseek_v4_ops/fp8_einsum.py`
-  - Dispatch in `deepseek_v4_fp8_einsum`: on SM12x, reshape 2D weights → 3D and call Triton kernel instead of DeepGEMM
-  - Fixed `_einsum_recipe` and `_tma_aligned_scales` for SM12x in `DeepseekV4MLAAttention.__init__`
-  - Handles UE8M0 → float32 scale upcasting within the kernel
+  - Dispatch in `deepseek_v4_fp8_einsum`: reshape 2D→3D weights on SM12x, call Triton kernel
 
 ### Blocker #4: FlashMLA C extension not compiled for sm_121 — 🔴 CURRENT
 
-- **Crash:** `RuntimeError: vllm._flashmla_C is not available, likely was not compiled due to insufficient nvcc version or a supported arch was not in the list of target arches to compile for.`
-- **Location:** Decode attention — `flash_mla_sparse_fwd` called from `deepseek_v4_attention.py:1098`
-- **Root cause:** FlashMLA is a C extension that only compiles for sm_90/sm_100. The `is_flashmla_sparse_supported()` function explicitly rejects sm_121: `"FlashMLA Sparse is only supported on Hopper and Blackwell devices."`
-- **Impact:** The model loaded, completed dummy forward pass, allocated KV caches, and crashed when processing the **first inference request** (decode attention path)
-- **This is the largest remaining blocker.** The sparse MLA decode path is deeply integrated and has no fallback in stock v0.21.0.
+- **Crash:** `RuntimeError: vllm._flashmla_C is not available`
+- **Location:** Decode attention (`flash_mla_with_kvcache`) and prefill attention (`flash_mla_sparse_fwd`)
+- **Root cause:** FlashMLA is a C extension compiled only for sm_90/sm_100. `is_flashmla_sparse_supported()` explicitly rejects sm_121.
+- **Impact:** Model loads, completes dummy forward pass, allocates KV caches, crashes on first inference request
+- **This is the largest remaining blocker.** Requires porting ~3,500 lines of portable Triton sparse MLA from jasl/vllm.
 
-### Blocker #5: MARLIN MoE backend — ❓ UNKNOWN
+### Blocker #5: MARLIN MoE backend — ❓ UNKNOWN (untestable until #4 fixed)
 
-- The model selects `Using 'MARLIN' Mxfp4 MoE backend` — this may work on sm_121 since we compiled with `TORCH_CUDA_ARCH_LIST="12.0 12.1"` (arch 12.0 compiles NVFP4/MXFP4 kernels)
-- **Cannot test** until blocker #4 is resolved
+- Model selects `Using 'MARLIN' Mxfp4 MoE backend` — may work on sm_121 since arch 12.0 compiles NVFP4/MXFP4 kernels
 
 ### Blocker #6: DeepGEMM MQA logits (sparse attention indexer) — ❓ UNKNOWN
 
-- `fp8_fp4_mqa_logits` and `fp8_fp4_paged_mqa_logits` from DeepGEMM have no SM12x support
-- May or may not be hit depending on the decode path taken — need to test
-- jasl/vllm provides Triton fallbacks
+- May be hit depending on decode path after Triton sparse MLA is integrated
+- jasl/vllm provides torch.einsum + Triton fallbacks
 
 ## What works (confirmed by run logs)
 
 | Component | Status | Notes |
 |---|---|---|
-| Model weight loading | ✅ | 37.84 GiB per GPU, ~46-119s |
+| Model weight loading | ✅ | 37.84 GiB per GPU |
 | `CutlassFp8BlockScaledMMKernel` | ✅ | Selected for FP8 dense layers |
 | UE8M0 scale handling | ✅ | Upcast to float32 at load time |
 | mHC (hyper-connection) | ✅ | tilelang + Triton fallback |
@@ -83,34 +75,124 @@ Each blocker was discovered incrementally: fix one, run the model, see what cras
 | FP8 indexer cache | ✅ | `Using FP8 indexer cache for Lightning Indexer` |
 | Expert parallelism | ✅ | 64 local / 256 global experts per rank |
 | KV cache memory computation | ✅ | ~67.5 GiB per GPU |
-| NCCL cross-node | ✅ | Working with custom all-reduce disabled |
 | Dummy forward pass | ✅ | Completes successfully on all 4 nodes |
 | Decode attention | ❌ | FlashMLA not compiled for sm_121 |
 | MoE expert GEMM | ❓ | MARLIN selected but untested |
 
 ## GPU OOM note
 
-The first successful dummy run hit GPU OOM during KV cache allocation with `--gpu-memory-utilization 0.90` and `--max-model-len 262144`. Reducing these parameters (e.g., `--gpu-memory-utilization 0.85` and `--max-model-len 131072`) allows KV caches to fit. This is a memory tuning issue, not a code blocker.
+With `--gpu-memory-utilization 0.90` and `--max-model-len 262144`, GPU OOM occurs during KV cache allocation. Reducing these parameters (e.g., `0.85` and `131072`) allows KV caches to fit. Memory tuning issue, not a code blocker.
 
-## jasl/vllm ds4-sm120 fork — reference for remaining blockers
+## Plan: Porting Triton sparse MLA (Blocker #4)
+
+The FlashMLA C extension provides two functions used by DS4-Flash attention:
+1. **`flash_mla_with_kvcache`** — decode path (SWA-only and compressed c4a/c128a)
+2. **`flash_mla_sparse_fwd`** — prefill path (c4a/c128a sparse attention over gathered KV)
+
+Both crash on sm_121. jasl/vllm replaces them with portable Triton kernels on SM12x. The port is structured in 4 phases:
+
+### Phase 1: Environment detection + guard infrastructure (~150 lines)
+
+**Goal:** Add SM12x detection and env var controls so the codebase knows when to use Triton sparse MLA instead of FlashMLA.
+
+**Files to create/modify:**
+- **Create** `vllm/v1/attention/backends/mla/sparse_mla_env.py` (150 lines) — from jasl
+  - `is_triton_sparse_mla_enabled_for_platform()` — returns True on SM12x
+  - `is_triton_sparse_mla_enabled(device)` — per-device check
+  - `triton_sparse_mla_matmul_decode_enabled()` — matmul decode toggle
+  - `triton_sparse_mla_topk_chunk_size()` / `query_chunk_size()` / `head_block_size()` — tuning knobs
+  - `disable_triton_sparse_mla_cudagraphs_if_enabled()` — CUDA graph compat
+- **Modify** `vllm/envs.py` — add env var definitions (`VLLM_TRITON_MLA_SPARSE`, etc.)
+- **Modify** `vllm/v1/attention/backends/mla/flashmla_sparse.py` (~18 lines) — add SM12x guard for CUDA graphs
+
+**Test:** Import and call `is_triton_sparse_mla_enabled_for_platform()` on sm_121, verify it returns True.
+
+### Phase 2: Triton sparse MLA kernels (~2,700 lines)
+
+**Goal:** Port the portable Triton kernels that replace FlashMLA for decode and prefill attention.
+
+**Files to create:**
+- **Create** `vllm/v1/attention/backends/mla/sparse_mla_kernels.py` (2,694 lines) — from jasl
+  - Decode kernels: `fp8ds_paged_sparse_mla_attention_with_sink_multihead`, `fp8ds_global_paged_sparse_mla_attention_with_sink_multihead`, `matmul_sparse_mla_attention_with_sink`
+  - Prefill kernels: `accumulate_fp8ds_global_slots_sparse_mla_attention_chunk_multihead`, `accumulate_indexed_sparse_mla_attention_chunk`, `build_combined_sparse_mla_decode_valid_mask`, `finish_sparse_mla_attention_with_sink`, `finish_two_sparse_mla_attention_states_with_sink`
+  - Helper: `sparse_mla_decode_head_block_size`, `dequantize_combined_sparse_mla_decode_kv`
+- **Create** `vllm/v1/attention/backends/mla/sparse_mla_reference.py` (242 lines) — from jasl
+  - Reference implementation for correctness testing
+
+**Test:** Import kernels, run a small decode attention test with known inputs to verify numerical correctness.
+
+### Phase 3: Attention dispatch integration (~700 lines diff)
+
+**Goal:** Wire the Triton sparse MLA kernels into `deepseek_v4_attention.py` so that on SM12x, `_forward_decode` and `_forward_prefill` use the Triton path instead of FlashMLA.
+
+**Files to modify:**
+- **Modify** `vllm/model_executor/layers/deepseek_v4_attention.py` (~694 changed lines from jasl)
+  - Import `sparse_mla_kernels` and `sparse_mla_env`
+  - Add `_forward_sparse_mla_swa_decode_triton()` — SWA-only decode via Triton
+  - Add `_forward_sparse_mla_compressed_decode_triton()` — c4a/c128a decode via Triton
+  - Modify `_forward_decode()` — dispatch to Triton on SM12x before FlashMLA
+  - Modify `_forward_prefill()` — add Triton chunked prefill path
+  - Modify `__init__()` — call `disable_triton_sparse_mla_cudagraphs_if_enabled()`
+  - Modify `get_kv_cache_spec()` — adjust alignment for Triton MLA (576 → variable)
+- **Modify** `vllm/v1/attention/backends/mla/sparse_swa.py` (~47 changed lines) — sink-aware SWA additions
+- **Modify** `vllm/v1/attention/backends/mla/flashmla_sparse.py` (~18 changed lines) — CUDA graph guard
+
+**Test:** Run DS4-Flash with the Triton sparse MLA path. Decode attention should work. Verify output is not garbled.
+
+### Phase 4: MQA logits fallbacks (~1,300 lines)
+
+**Goal:** Replace DeepGEMM's MQA logits kernels with portable fallbacks for the c4a/c128a compressed attention indexer.
+
+**Files to create/modify:**
+- **Modify** `vllm/model_executor/layers/deepseek_v4_triton_kernels.py` (+1,130 lines)
+  - `sparse_attention_triton()` — bf16 sparse attention (prefill)
+  - `decode_sparse_attention_triton()` — fp8 decode sparse attention
+  - `fp8_mqa_logits_triton()` — FP8 MQA logits
+  - `fp8_paged_mqa_logits_triton()` — FP8 paged MQA logits
+  - `fp8_paged_mqa_logits_rowwise_triton()` — rowwise variant
+  - Helper functions: `_view_packed_fp8_paged_mqa_kv_cache`, `_e8m0_to_fp32`, `_unpack_int32_e8m0_scales`, `_normalize_deepseek_v4_fp8_einsum_inputs`
+- **Modify** `vllm/utils/deep_gemm.py` (~518 changed lines from jasl)
+  - SM12x dispatch for `fp8_fp4_mqa_logits` → `_fp8_mqa_logits_sm12x`
+  - SM12x dispatch for `fp8_fp4_paged_mqa_logits` → torch/Triton fallback
+  - SM12x dispatch for `fp8_fp4_mqa_topk_indices` → `_fp8_mqa_logits_topk_torch`
+  - `_uses_deep_gemm_scheduler_metadata()` — returns False on SM12x
+- **Modify** `vllm/v1/attention/backends/mla/indexer.py` (~29 changed lines)
+  - `sparse_indexer_max_logits_bytes()` — reduced max logits on SM12x (256MB vs 512MB)
+  - `_uses_deep_gemm_scheduler_metadata()` — SM12x guard for DeepGEMM metadata path
+- **Modify** `vllm/model_executor/layers/sparse_attn_indexer.py` (~126 changed lines)
+  - SM12x short-row top-k fallback
+  - SM12x logits width constraints
+
+**Test:** Full c4a/c128a compressed attention should work. Run with longer context to exercise indexer.
+
+### Post-Phase 4: MoE validation
+
+Once all four phases are complete and the model serves tokens, verify that the MARLIN MoE backend works for FP4 expert GEMMs. If it does, no additional work needed. If not, may need to investigate MoE fallbacks.
+
+### Estimated line counts per phase
+
+| Phase | New lines | Changed lines | Complexity |
+|---|---|---|---|
+| 1. Env detection | ~150 | ~50 | Low |
+| 2. Triton kernels | ~2,940 | ~0 | High (Triton math) |
+| 3. Dispatch integration | ~0 | ~700 | High (API coupling) |
+| 4. MQA logits fallbacks | ~1,130 | ~700 | Medium |
+| **Total** | ~4,220 | ~1,450 | — |
+
+### Key risks
+
+- **v0.20.1 → v0.21.0 API drift:** jasl's fork is based on v0.20.1rc1. The `deepseek_v4_attention.py` diff (694 lines) is the riskiest — many changes are intertwined with other v0.20.1→v0.21.0 differences.
+- **SM120 vs SM121:** jasl tested on RTX PRO 6000 (SM120). Triton kernels should work on both, but SM121-specific testing is needed.
+- **`sparse_mla_kernels.py` is the biggest file** (2,694 lines). Mostly pure Triton math with minimal vLLM API coupling, which makes it the safest large port.
+- **Phase 3 (dispatch) is the hardest** despite being the smallest in lines — it touches `deepseek_v4_attention.py` which has diverged significantly between v0.20.1 and v0.21.0.
+
+### Approach: write our own code, use jasl as reference
+
+Following the same strategy that worked for blockers #1–#3: study jasl's fork for the approach, then write our own implementation on v0.21.0-sm121-fix. This avoids merge conflicts and ensures we understand every line.
+
+## jasl/vllm ds4-sm120 fork — reference
 
 [jasl/vllm](https://github.com/jasl/vllm/tree/ds4-sm120), branch `ds4-sm120`, PR [#40991](https://github.com/vllm-project/vllm/pull/40991). DeepGEMM-free DS4-Flash on SM12x with portable Triton fallbacks. Tested on 2× RTX PRO 6000 (SM120).
-
-### Key approach: Triton sparse MLA replaces FlashMLA
-
-The fork's most significant addition is a complete portable Triton sparse MLA decode path (`VLLM_TRITON_MLA_SPARSE=1`), auto-enabled on SM12x where FlashMLA is unavailable. This is what we need for blocker #4.
-
-### Environment variables added
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `VLLM_TRITON_MLA_SPARSE` | auto | `1` forces Triton sparse MLA; auto-enables on SM12x |
-| `VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE` | `512` | Top-k candidate chunk size for sparse MLA accumulation |
-| `VLLM_TRITON_MLA_SPARSE_QUERY_CHUNK_SIZE` | `256` | Query chunk size for prefill sparse MLA fallback |
-| `VLLM_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH` | context | CUDA graphs for sparse MLA; disables for speculative |
-| `VLLM_TRITON_MLA_SPARSE_HEAD_BLOCK_SIZE` | auto | Decode head block override |
-| `VLLM_TRITON_MLA_SPARSE_MATMUL_DECODE` | auto | Matmul-based sparse MLA decode; auto on SM12x |
-| `VLLM_DEEPSEEK_V4_USE_MEGA_MOE` | `False` | DeepGEMM MegaMoE; off by default (needed for SM12x) |
 
 ### Benchmark results (2× RTX PRO 6000, SM120)
 
@@ -121,51 +203,21 @@ The fork's most significant addition is a complete portable Triton sparse MLA de
 | 8 | 128→512 | 478.34 | 16.18 ms | 291.6 ms |
 | 1 | 8192→512 | 58.61 | 10.94 ms | 3143 ms |
 
-### Files to port for remaining blockers
+### Already ported from jasl (our work, adapted for v0.21.0)
 
-Sorted by priority:
-
-**For blocker #4 (FlashMLA / sparse MLA decode):**
-1. `vllm/v1/attention/backends/mla/sparse_mla_kernels.py` (2,694 new lines) — Triton kernels for sparse MLA decode
-2. `vllm/v1/attention/backends/mla/sparse_mla_env.py` (150 new lines) — env var controls
-3. `vllm/v1/attention/backends/mla/sparse_mla_reference.py` (242 new lines) — reference impl for testing
-4. `vllm/v1/attention/backends/mla/sparse_swa.py` (47 new lines) — sink-aware SWA additions
-5. `vllm/v1/attention/backends/mla/flashmla_sparse.py` (18 new lines) — SM12x guard
-6. `vllm/v1/attention/backends/mla/indexer.py` (29 changed lines) — SM12x indexer fallback
-7. `vllm/model_executor/layers/sparse_attn_indexer.py` (126 changed lines) — SM12x short-row top-k and logits fallbacks
-8. `vllm/model_executor/layers/deepseek_v4_attention.py` (694 changed lines) — Triton sparse MLA decode integration, env var logic
-9. `vllm/model_executor/layers/deepseek_v4_triton_kernels.py` (1,282 new lines total) — additional kernels for c4a/c128a compressor, MQA logits, etc.
-10. `vllm/utils/deep_gemm.py` (518 changed lines) — SM12x fallbacks for MQA logits, paged MQA
-11. `vllm/envs.py` (41 new lines) — new env vars
-
-**For blocker #5 (MoE):**
-12. `vllm/model_executor/models/deepseek_v4.py` (93 changed lines) — `_use_deepseek_v4_mega_moe()` guard
-
-**Already ported (our work):**
-- ✅ mHC Triton fallback — our own implementation, not from jasl
-- ✅ UE8M0 → float32 upcast in CutlassFp8BlockScaledMMKernel — simpler than jasl's approach
+- ✅ mHC Triton fallback — our own implementation, inspired by jasl's approach
+- ✅ UE8M0 → float32 upcast — simpler than jasl's approach (we keep CutlassFp8BlockScaledMMKernel, jasl disables it on SM12x)
 - ✅ FP8 einsum Triton fallback — adapted from jasl's `fp8_einsum.py`
-- ✅ `_einsum_recipe` / `_tma_aligned_scales` fix for SM12x
+- ✅ `_einsum_recipe` / `_tma_aligned_scales` fix — from jasl's approach
 
-### Risks and considerations
+### What works (from MiniMax-M2.7 investigation)
 
-- jasl's fork is based on v0.20.1rc1, not v0.21.0. Direct merge is not possible — must cherry-pick and adapt.
-- The sparse MLA path is the largest and most complex port (3,000+ lines across multiple files).
-- jasl's fork tested on SM120 (RTX PRO 6000), not SM121 (GB10). Triton kernels should work on both but SM121-specific testing is needed.
-- The `deepseek_v4_attention.py` diff is 694 changed lines — many are intertwined with other changes. Will need careful review.
-
-## tilelang on sm_121 — verified working
-
-tilelang 0.1.9 is installed and works on sm_121. `mhc_pre_big_fuse_tilelang` JIT-compiles and produces correct Sinkhorn-normalized outputs. TVM targets `cuda -arch=sm_121` correctly.
-
-## What works (from MiniMax-M2.7 investigation)
-
-- `CutlassFp8BlockScaledMMKernel` — sm_121 cubins compile and run correctly with our patches
-- `TORCH_CUDA_ARCH_LIST="12.0 12.1"` — both archs needed (12.0 for NVFP4/MXFP4, 12.1 for native sm_121 FP8 block-scaled GEMM)
-- CUDA graphs — work on sm_121, significant decode throughput boost (9 tk/s → 22 tk/s for MiniMax-M2.7)
-- Expert parallel with TP4 — works correctly with `CutlassFp8BlockScaledMMKernel`
+- `CutlassFp8BlockScaledMMKernel` — sm_121 cubins compile and run correctly
+- `TORCH_CUDA_ARCH_LIST="12.0 12.1"` — both archs needed
+- CUDA graphs — work on sm_121 (9 tk/s → 22 tk/s for MiniMax-M2.7)
+- Expert parallel with TP4 — works correctly
 - `VLLM_DISABLED_KERNELS` — must be unset before Ray starts
 
 ## Current run script
 
-`model_scripts/run-deepseek-v4-flash.sh` — currently has `--enforce-eager` and `--enable-expert-parallel`. `VLLM_DISABLED_KERNELS` is NOT set (good).
+`model_scripts/run-deepseek-v4-flash.sh` — currently has `--enforce-eager` and `--enable-expert-parallel`.
