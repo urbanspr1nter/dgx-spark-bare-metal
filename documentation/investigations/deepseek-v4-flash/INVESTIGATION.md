@@ -1,6 +1,6 @@
 # DeepSeek-V4-Flash on DGX Spark (sm_121 / GB10)
 
-## Status: In Progress — Blocker #1 (mHC) fixed
+## Status: In Progress — Blockers #1, #2, #3 fixed; testing Blocker #4
 
 **Goal:** Serve DeepSeek-V4-Flash (284B MoE, 13B active params) on a 4× DGX Spark cluster.
 
@@ -238,29 +238,28 @@ Now that we've seen the model actually attempt to run, the blockers are clear an
   - The post-GEMM fusion (`mhc_pre_big_fuse_tilelang`) already works on sm_121 via tilelang — no changes needed
   - Verified: full mHC pipeline produces correct outputs on sm_121
 
-**Blocker #2: UE8M0 ScalarType in cutlass_scaled_mm — CRASH (mHC fixed, new crash)**
-- After mHC fix, the model proceeds to the attention layer's fused Wq/Wk/Wv projection
+**Blocker #2: UE8M0 ScalarType in cutlass_scaled_mm — FIXED** ✅
+- After mHC fix, the model proceeded to the attention layer's fused Wq/Wk/Wv projection
 - DS4-Flash uses `quantization_config.scale_fmt=ue8m0` — 8-bit exponent-only scales (ScalarType 44)
-- `CutlassFp8BlockScaledMMKernel` is selected (same as MiniMax-M2.7) but MiniMax uses Float32 scales
-- The C++ `torch.ops._C.cutlass_scaled_mm()` op does not support ScalarType 44 (UE8M0)
-- Error: `RuntimeError: Not yet supported ScalarType 44, please file an issue describing your use case`
-- Stack: `deepseek_v4_attention.py:426 attn_gemm_parallel_execute → fused_wqa_wkv → BlockScaledMMLinearKernel.apply_block_scaled_mm → cutlass_scaled_mm`
-- **Fix needed:** Either (a) add UE8M0 ScalarType support to the C++ cutlass_scaled_mm kernel, or (b) add a fallback that converts UE8M0 scales to Float32 before calling cutlass_scaled_mm, or (c) use a different kernel path for UE8M0-scaled FP8 ops
+- `CutlassFp8BlockScaledMMKernel` was selected but the C++ `cutlass_scaled_mm` op doesn't support ScalarType 44
+- **Fix:** Added `process_weights_after_loading` in `CutlassFp8BlockScaledMMKernel` that upcasts UE8M0 scales to float32 using existing `_upcast_e8m0_to_fp32` helper. This is lossless since UE8M0 values are always exact powers of 2. Commit `78bf5cda7`.
 
-**Blocker #3: DeepGEMM MQA logits (sparse attention indexer) — NOT YET HIT**
+**Blocker #3: DeepGEMM FP8 einsum — FIXED** ✅
+- After UE8M0 fix, model proceeds further into attention and crashes in `fp8_einsum` (DeepGEMM's einsum for the `wo_a` O-projection inverse-RoPE)
+- Error: `RuntimeError: Assertion error (layout.hpp:39): t.dim() == N` — DeepGEMM's layout assertions fail on SM12x
+- Also fixed `_einsum_recipe` for SM12x: was `(1, 1, 128)` with `tma_aligned_scales=True` (SM100 path); now `(1, 128, 128)` with `tma_aligned_scales=False`
+- **Fix:** New Triton kernel `deepseek_v4_sm12x_fp8_einsum` in `vllm/v1/attention/ops/deepseek_v4_ops/fp8_einsum.py`. Dispatch logic in `deepseek_v4_fp8_einsum` reshapes 2D weights to 3D and calls Triton kernel on SM12x. Commit `648b521fe`.
+
+**Blocker #4: DeepGEMM MQA logits (sparse attention indexer) — NOT YET HIT**
 - `fp8_fp4_mqa_logits` and `fp8_fp4_paged_mqa_logits` from DeepGEMM have no SM12x support
 - **Fix needed:** SM12x fallback (torch.einsum or Triton) — jasl/vllm provides this
 
-**Blocker #4: DeepGEMM FP8 einsum (compressor / inverse-RoPE) — NOT YET HIT**
-- `fp8_einsum` from DeepGEMM used for c4a/c128a attention operations
-- **Fix needed:** SM12x Triton einsum kernel — jasl/vllm provides `deepseek_v4_fp8_einsum`
-
-**Blocker #5: DeepGEMM MegaMoE (FP4 grouped GEMM) — NOT YET HIT**
+**Blocker #5: DeepGEMM MegaMoE (FP4 grouped GEMM) — NOT YET HIT** (renumbered from #5)
 - `_grouped_fp4_impl` from DeepGEMM for fused expert computation
 - The model currently selects MARLIN as the MoE backend, which may or may not work
 - **Note:** The log shows `Using 'MARLIN' Mxfp4 MoE backend` — this is interesting. If MARLIN actually works for FP4 MoE on sm_121, this might not be a blocker at all.
 
-**Blocker #6: Triton sparse MLA (decode attention) — NOT YET HIT**
+**Blocker #6: Triton sparse MLA (decode attention) — NOT YET HIT** (renumbered from #6)
 - FlashMLA sparse uses DeepGEMM under the hood
 - **Fix needed:** Portable Triton sparse MLA decode path — jasl/vllm provides this
 
