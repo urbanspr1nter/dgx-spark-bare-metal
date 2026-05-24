@@ -238,21 +238,29 @@ Now that we've seen the model actually attempt to run, the blockers are clear an
   - The post-GEMM fusion (`mhc_pre_big_fuse_tilelang`) already works on sm_121 via tilelang — no changes needed
   - Verified: full mHC pipeline produces correct outputs on sm_121
 
-**Blocker #2: DeepGEMM MQA logits (sparse attention indexer) — NOT YET HIT**
-- Would be the next failure after mHC is fixed
+**Blocker #2: UE8M0 ScalarType in cutlass_scaled_mm — CRASH (mHC fixed, new crash)**
+- After mHC fix, the model proceeds to the attention layer's fused Wq/Wk/Wv projection
+- DS4-Flash uses `quantization_config.scale_fmt=ue8m0` — 8-bit exponent-only scales (ScalarType 44)
+- `CutlassFp8BlockScaledMMKernel` is selected (same as MiniMax-M2.7) but MiniMax uses Float32 scales
+- The C++ `torch.ops._C.cutlass_scaled_mm()` op does not support ScalarType 44 (UE8M0)
+- Error: `RuntimeError: Not yet supported ScalarType 44, please file an issue describing your use case`
+- Stack: `deepseek_v4_attention.py:426 attn_gemm_parallel_execute → fused_wqa_wkv → BlockScaledMMLinearKernel.apply_block_scaled_mm → cutlass_scaled_mm`
+- **Fix needed:** Either (a) add UE8M0 ScalarType support to the C++ cutlass_scaled_mm kernel, or (b) add a fallback that converts UE8M0 scales to Float32 before calling cutlass_scaled_mm, or (c) use a different kernel path for UE8M0-scaled FP8 ops
+
+**Blocker #3: DeepGEMM MQA logits (sparse attention indexer) — NOT YET HIT**
 - `fp8_fp4_mqa_logits` and `fp8_fp4_paged_mqa_logits` from DeepGEMM have no SM12x support
 - **Fix needed:** SM12x fallback (torch.einsum or Triton) — jasl/vllm provides this
 
-**Blocker #3: DeepGEMM FP8 einsum (compressor / inverse-RoPE) — NOT YET HIT**
+**Blocker #4: DeepGEMM FP8 einsum (compressor / inverse-RoPE) — NOT YET HIT**
 - `fp8_einsum` from DeepGEMM used for c4a/c128a attention operations
 - **Fix needed:** SM12x Triton einsum kernel — jasl/vllm provides `deepseek_v4_fp8_einsum`
 
-**Blocker #4: DeepGEMM MegaMoE (FP4 grouped GEMM) — NOT YET HIT**
+**Blocker #5: DeepGEMM MegaMoE (FP4 grouped GEMM) — NOT YET HIT**
 - `_grouped_fp4_impl` from DeepGEMM for fused expert computation
 - The model currently selects MARLIN as the MoE backend, which may or may not work
 - **Note:** The log shows `Using 'MARLIN' Mxfp4 MoE backend` — this is interesting. If MARLIN actually works for FP4 MoE on sm_121, this might not be a blocker at all.
 
-**Blocker #5: Triton sparse MLA (decode attention) — NOT YET HIT**
+**Blocker #6: Triton sparse MLA (decode attention) — NOT YET HIT**
 - FlashMLA sparse uses DeepGEMM under the hood
 - **Fix needed:** Portable Triton sparse MLA decode path — jasl/vllm provides this
 
