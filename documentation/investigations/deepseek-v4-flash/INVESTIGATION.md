@@ -2,7 +2,7 @@
 
 ## Status: ✅ SERVING — DeepSeek-V4-Flash running on 4× DGX Spark (sm_121 / GB10)
 
-All 6 blockers resolved. Model produces coherent output. Torch fallbacks for MQA logits are functional but slow — Phase 6c (Triton kernels) will improve decode throughput.
+All 6 blockers resolved. Model produces correct output on short prompts. **Known issue:** quality degrades on longer sequences — likely numerical drift in torch/Triton fallback paths compounding over many decode steps. Fixable via Phase 6c (Triton MQA logits kernels) and sparse MLA kernel validation. Decode throughput ~4-5 tk/s (torch MQA fallback + `--enforce-eager`).
 
 **Goal:** Serve DeepSeek-V4-Flash (284B MoE, 13B active params) on a 4× DGX Spark cluster.
 
@@ -69,7 +69,8 @@ Each blocker was discovered incrementally: fix one, run the model, see what cras
   - **`deep_gemm.py` (+460 lines):** SM12x dispatch in `fp8_fp4_mqa_logits` → `_fp8_mqa_logits_torch` (chunked head-K matmul), `fp8_fp4_paged_mqa_logits` → `_fp8_paged_mqa_logits_torch` (per-batch paged KV gather + matmul), new `fp8_fp4_mqa_topk_indices` and `fp8_fp4_paged_mqa_topk_indices` for direct top-k without full logits, `_view_packed_fp8_paged_mqa_kv_cache` helper
   - **`indexer.py` (+5/-4):** Guard `get_paged_mqa_logits_metadata` with `is_device_capability_family(120)` check
   - **`sparse_attn_indexer.py` (+49/-39):** Import new top-k functions, prefill/decode try direct top-k before full logits, DeepGEMM init guard allows SM12x
-- **Remaining:** Phase 6c — Triton MQA logits kernels for performance (torch fallbacks are correct but slow)
+- **KV cache view bug (commit `779733d91`):** `_view_packed_fp8_paged_mqa_kv_cache` assumed split layout (FP8 values then all scales at end of block) but actual indexer KV cache uses interleaved per-token layout (`[fp8(head_dim)][scale(8)]` per token). Fixed strides and offset.
+- **Remaining:** Phase 6c — Triton MQA logits kernels for performance and correctness on long sequences (torch fallbacks have quality issues on long generation)
 
 - Model selects `Using 'MARLIN' Mxfp4 MoE backend` — may work on sm_121 since arch 12.0 compiles NVFP4/MXFP4 kernels
 
@@ -363,3 +364,32 @@ Following the same strategy that worked for blockers #1–#3: study jasl's fork 
 ## Current run script
 
 `model_scripts/run-deepseek-v4-flash.sh` — currently has `--enforce-eager` and `--enable-expert-parallel`.
+
+## End-to-end test results (post-Blocker #6 fix)
+
+All 6 blockers resolved. Server starts and serves requests.
+
+**Short prompt test ("Capital of France?"):**
+- ✅ Correct: "Paris" — clean, no repetition
+
+**Code generation test ("Python palindrome function"):**
+- ✅ Correct: clean code, no repetition, `finish_reason: stop`
+
+**Knowledge test ("Stack vs queue"):**
+- ⚠️ Correct content but minor token artifacts (e.g. `#️⃣`, `ORN` mixed in)
+
+**Long generation test ("Write a Tetris game"):**
+- ❌ Quality degrades: hallucinated function names, mangled tool calls, garbled output
+- Root cause: likely numerical drift in torch/Triton fallback paths compounding over many decode steps
+- Most probable source: `_fp8_paged_mqa_logits_torch` or `_fp8_paged_mqa_logits_topk_torch` (decode MQA logits)
+
+**Throughput:** ~4-5 tk/s decode (torch MQA fallback + `--enforce-eager`)
+
+**Bug found and fixed during testing:** `_view_packed_fp8_paged_mqa_kv_cache` assumed split layout (FP8 values then all scales at end of block) but the actual indexer KV cache uses interleaved per-token layout (`[fp8(head_dim)][scale(8)]` per token). This caused garbage scale values on decode, producing incorrect top-k indices. Fix: commit `779733d91`.
+
+## Remaining optimizations (priority order)
+
+1. **Phase 6c: Triton MQA logits kernels** — Replace torch matmul loops with GPU kernels matching DeepGEMM semantics. Will fix quality degradation on long sequences and dramatically improve decode throughput. Reference: jasl's `fp8_mqa_logits_triton` and `fp8_paged_mqa_logits_triton`.
+2. **Remove `--enforce-eager`** — Enable CUDA graphs for ~2-3x throughput improvement (observed 9→22 tk/s on MiniMax-M2.7).
+3. **Sparse MLA kernel validation** — Test Phase 3 Triton kernels against reference on long sequences to ensure no numerical drift.
+4. **MoE tuning** — TRITON MoE backend has no GB10-tuned configs; add tuned configs for DGX Spark.
