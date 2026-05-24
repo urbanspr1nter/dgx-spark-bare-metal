@@ -1,6 +1,6 @@
 # DeepSeek-V4-Flash on DGX Spark (sm_121 / GB10)
 
-## Status: Investigation
+## Status: In Progress — Blocker #1 (mHC) fixed
 
 **Goal:** Serve DeepSeek-V4-Flash (284B MoE, 13B active params) on a 4× DGX Spark cluster.
 
@@ -227,12 +227,16 @@ RuntimeError: Assertion error (csrc/apis/hyperconnection.hpp:56): Unsupported ar
 
 Now that we've seen the model actually attempt to run, the blockers are clear and ordered:
 
-**Blocker #1: mHC (Manifold-Constrained Hyper-Connection) — CRASH**
+**Blocker #1: mHC (Manifold-Constrained Hyper-Connection) — ✅ FIXED**
 - `tf32_hc_prenorm_gemm()` from DeepGEMM calls a C++ extension that asserts on architecture
 - This is the **first** thing called in every DS4-Flash transformer layer
 - DeepGEMM's `csrc/apis/hyperconnection.hpp:56` has `assert(arch == 90 || arch == 100)` (or similar)
-- **Fix needed:** Either (a) a Triton/PyTorch fallback for `mhc_pre` on SM12x (like jasl/vllm provides via tilelang), or (b) a native sm_121 implementation of the tf32 hc prenorm GEMM
-- **jasl/vllm approach:** Uses `tilelang` for the `mhc_pre_big_fuse` kernel (the post-GEMM fusion step), but still calls DeepGEMM's `tf32_hc_prenorm_gemm` for the actual GEMM. In their PR, they modified `vllm/utils/deep_gemm.py` to add SM12x fallback paths.
+- **Fix applied** (commit `ffabca2e3` on `v0.21.0-sm121-fix`):
+  - Added `is_device_capability_family(120)` check in `tf32_hc_prenorm_gemm()` to route SM12x to fallback
+  - Triton split-K kernel (`tf32_hc_prenorm_gemm_triton` in `deepseek_v4_triton_kernels.py`) — primary path
+  - Pure torch.matmul fallback (`_tf32_hc_prenorm_gemm_torch`) — writes full result to split-0
+  - The post-GEMM fusion (`mhc_pre_big_fuse_tilelang`) already works on sm_121 via tilelang — no changes needed
+  - Verified: full mHC pipeline produces correct outputs on sm_121
 
 **Blocker #2: DeepGEMM MQA logits (sparse attention indexer) — NOT YET HIT**
 - Would be the next failure after mHC is fixed
