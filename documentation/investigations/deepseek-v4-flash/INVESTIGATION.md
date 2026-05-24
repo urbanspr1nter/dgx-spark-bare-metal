@@ -179,23 +179,18 @@ This is the hardest phase despite being the smallest in lines — it touches `de
 
 **Test:** `is_triton_sparse_mla_enabled(cuda:0)` returns True on sm_121. SWA-only layers will use Triton path at runtime.
 
-#### Phase 3c: Compressed decode path (~170 lines new)
+#### Phase 3c: Compressed decode path — ✅ DONE (commit `08e980f8b`)
 
-The most complex decode path — c4a/c128a layers with compressed attention. Three sub-paths selected at runtime:
+**Files modified:**
+- **Modified** `vllm/model_executor/layers/deepseek_v4_attention.py` (+195/-4)
+  - Implemented `_forward_sparse_mla_compressed_decode_triton` (211 lines) with three runtime sub-paths:
+    1. **Matmul decode** (small batch, `triton_sparse_mla_matmul_decode_enabled`, single topk chunk): dequantize all KV → `matmul_sparse_mla_attention_with_sink`
+    2. **Fused kernel** (single topk chunk, non-MTP): `fp8ds_global_paged_sparse_mla_attention_with_sink_multihead`
+    3. **Chunked fallback** (large topk or MTP): chunked compressed accumulate + paged/slot SWA accumulate + `finish_two_sparse_mla_attention_states_with_sink`
+  - All paths zero padding heads when `padded_heads > num_heads`
+  - Workspace allocation via `current_workspace_manager().get_simultaneous()` for matmul (3 buffers) and chunked (6 float32 buffers)
 
-1. **Matmul decode** (small batch, `triton_sparse_mla_matmul_decode_enabled()`): dequantize all KV into combined buffer via `dequantize_combined_sparse_mla_decode_kv`, compute `matmul_sparse_mla_attention_with_sink`. Best for ≤16 decode tokens.
-2. **Fused kernel** (single topk chunk, non-MTP): `fp8ds_global_paged_sparse_mla_attention_with_sink_multihead` — handles compressed + SWA in one kernel launch.
-3. **Chunked fallback** (large topk or MTP): chunked `accumulate_fp8ds_global_slots_sparse_mla_attention_chunk_multihead` for compressed + `accumulate_fp8ds_paged_sparse_mla_attention_chunk_multihead` for SWA, then `finish_two_sparse_mla_attention_states_with_sink`.
-
-**Files to modify:**
-- **Modify** `vllm/model_executor/layers/deepseek_v4_attention.py`
-  - Add `_forward_sparse_mla_compressed_decode_triton` method on `DeepseekV4MLAAttention`
-  - Add dispatch in `_forward_decode`: `if compress_ratio in (4, 128): → compressed triton path; return`
-  - Add workspace allocations via `current_workspace_manager().get_simultaneous(...)` for matmul decode (combined_kv, valid_tokens, score_buffer) and chunked fallback (6 float32 buffers)
-
-**Test:** Run DS4-Flash — c4a/c128a layers should decode. Verify output is coherent (not garbled).
-
-**Key risk:** The matmul decode path (`dequantize_combined_sparse_mla_decode_kv` + `matmul_sparse_mla_attention_with_sink`) has not been tested end-to-end with real DS4-Flash cache data. The fused and chunked paths were unit-tested in Phase 2 but not with real cache layouts.
+**Test:** Method fully implemented, imports verified. End-to-end test requires running DS4-Flash (deferred to post-Phase 3d integration test).
 
 #### Phase 3d: Prefill path (~100 lines changed/added)
 
