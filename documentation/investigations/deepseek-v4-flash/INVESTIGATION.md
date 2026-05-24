@@ -141,30 +141,27 @@ Both crash on sm_121. jasl/vllm replaces them with portable Triton kernels on SM
 
 This is the hardest phase despite being the smallest in lines — it touches `deepseek_v4_attention.py` which has diverged significantly between jasl's v0.20.1 and our v0.21.0. Broken into 4 testable sub-phases:
 
-#### Phase 3a: Infrastructure & helpers (~50 lines)
+#### Phase 3a: Infrastructure & helpers — ✅ DONE (commit `f441f51e0`)
 
-The plumbing needed before any Triton paths can work. No runtime behavior change.
+**Files modified:**
+- **Modified** `vllm/model_executor/layers/deepseek_v4_attention.py` (+216/-48)
+  - Imported `sparse_mla_env` (6 functions), `sparse_mla_kernels` (9 functions), `dequantize_combined_sparse_mla_decode_kv`, `sparse_prefill_combined_topk_size`
+  - Added `disable_triton_sparse_mla_cudagraphs_if_enabled()` call in `DeepseekV4MLAAttentionWrapper.__init__`
+  - Added `_reserve_prefill_workspace`, `_prefill_workspace_reservation_specs`, `_prefill_workspace_topk_bound` methods on `DeepseekV4MLAAttention`
+  - Replaced inline dummy-run workspace reservation with `_reserve_prefill_workspace()`
+  - Added `_sparse_mla_prefill_workspace_bounds`, `_sparse_mla_prefill_gather_len_upper_bound` helpers
+  - Refactored `_deepseek_v4_fp8_einsum_config`, added `_allocate_deepseek_v4_wo_a_output`, `_DEFAULT_SPARSE_MLA_TOPK_TOKENS`
+  - Improved `deepseek_v4_fp8_einsum`: TP rank partitioning for 2D weights, scale shape validation, 3D scale support
+- **Modified** `vllm/v1/attention/backends/mla/sparse_swa.py` (+52)
+  - Added `prefill_seq_lens_cpu` and `prefill_gather_lens_cpu` fields to `DeepseekSparseSWAMetadata`
+  - Added `get_cudagraph_support` override on `DeepseekSparseSWAMetadataBuilder`
+  - Early-return from `build_tile_scheduler` when Triton MLA is enabled
+  - Compute CPU metadata from `seq_lens_cpu_upper_bound` in `_build_deepseek_v4_metadata`
+- **Modified** `vllm/v1/attention/ops/deepseek_v4_ops/cache_utils.py` (+58/-10)
+  - Added optional output buffers to `combine_topk_swa_indices` and `compute_global_topk_indices_and_lens`
+  - Use `sparse_prefill_combined_topk_size` for alignment calculation
 
-**Files to modify:**
-- **Modify** `vllm/model_executor/layers/deepseek_v4_attention.py`
-  - Import `sparse_mla_env` (6 functions) and `sparse_mla_kernels` (9 functions)
-  - Import `dequantize_combined_sparse_mla_decode_kv` and `sparse_prefill_combined_topk_size` from `deepseek_v4_ops`
-  - Add `disable_triton_sparse_mla_cudagraphs_if_enabled()` call in `DeepseekV4MLAAttentionWrapper.__init__`
-  - Add `_reserve_prefill_workspace` method on `DeepseekV4MLAAttention` — replaces inline workspace reservation in dummy-run path; also reserves Triton state buffers (max_score, denom, acc) when SM12x is detected
-  - Add `_prefill_workspace_topk_bound` helper — derives topk bound from `topk_indices_buffer` or `indexer.topk_tokens`
-  - Add `_prefill_workspace_reservation_specs` helper — returns workspace tensor specs for both FlashMLA and Triton paths
-  - Minor: `_deepseek_v4_fp8_einsum_config` refactor, `_allocate_deepseek_v4_wo_a_output` helper, move `_DEFAULT_SPARSE_MLA_TOPK_TOKENS` constant
-- **Modify** `vllm/v1/attention/backends/mla/sparse_swa.py`
-  - Import `sparse_mla_env` functions
-  - Add `prefill_seq_lens_cpu` and `prefill_gather_lens_cpu` fields to `DeepseekSparseSWAMetadata`
-  - Add `get_cudagraph_support` override on `DeepseekV4SWACache` — returns `NEVER` when DS4 + Triton MLA + CUDA graphs disabled
-  - Compute and store `prefill_seq_lens_cpu` / `prefill_gather_lens_cpu` in `DeepseekSparseSWAMetadataBuilder.build()`
-  - Early-return from FlashMLA decode planner when Triton MLA is enabled (skip FlashMLA tile scheduler)
-- **Modify** `vllm/v1/attention/ops/deepseek_v4_ops/cache_utils.py`
-  - Add optional `combined_indices` and `combined_lens` output buffer parameters to `combine_topk_swa_indices` — avoids re-allocation in prefill loop when Triton MLA provides pre-allocated buffers
-  - Use `sparse_prefill_combined_topk_size` for combined_topk calculation (was inline)
-
-**Test:** Import only — verify no import errors or initialization crashes.
+**Tests passed:** All imports verified, helper functions tested, `combine_topk_swa_indices` buffer reuse verified (same data pointer), `DeepseekSparseSWAMetadata` CPU fields present.
 
 #### Phase 3b: SWA decode path (~70 lines new)
 
