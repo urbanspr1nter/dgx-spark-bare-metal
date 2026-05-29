@@ -55,7 +55,7 @@ mkdir -p "$VLLM_PATH"
 cd "$VLLM_PATH"
 
 if [ ! -d "vllm/.git" ]; then
-    git clone https://github.com/urbanspr1nter/vllm
+    git clone https://github.com/vllm-project/vllm 
 fi
 
 cd "$VLLM_PATH/vllm"
