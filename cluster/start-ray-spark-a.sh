@@ -17,5 +17,5 @@ export RAY_memory_usage_threshold=0.99
 ray stop -f || true
 ray start \
     --head \
-    --node-ip-address=169.254.195.229 \
+    --node-ip-address=$VLLM_HOST_IP \
     --port=6379
