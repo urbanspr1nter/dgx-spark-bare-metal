@@ -16,6 +16,7 @@ BASE_PATH=/home/rngo/code/spark-vllm-docker
     -e NCCL_IB_TC=160 \
     -e NCCL_NVLS_ENABLE=0 \
     -e HF_TOKEN=$HF_TOKEN \
+    -e HF_DISABLE_XET="1" \
     -n $HOST_1,$HOST_2 \
     exec vllm serve \
     --model nvidia/MiniMax-M2.7-NVFP4 \

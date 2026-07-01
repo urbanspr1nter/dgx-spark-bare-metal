@@ -11,6 +11,8 @@ BASE_PATH="$HOME/code/spark-vllm-docker"
     -e NCCL_IB_GID_INDEX=3 \
     -e NCCL_IB_TC=160 \
     -e NCCL_NVLS_ENABLE=0 \
+    -e HF_TOKEN=$HF_TOKEN \
+    -e HF_DISABLE_XET="1" \
     --nccl-debug INFO \
     --ib-if rocep1s0f0 \
     --eth-if enp1s0f0np0 \
